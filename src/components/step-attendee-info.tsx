@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -19,10 +19,23 @@ interface StepAttendeeInfoProps {
 }
 
 export default function StepAttendeeInfo({ formData, updateFormData }: StepAttendeeInfoProps) {
+    // State for email validation error
+    const [emailError, setEmailError] = useState<string>('');
 
     const handleInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         const { name, value } = event.target;
         updateFormData({ [name]: value });
+
+        // Email validation
+        if (name === 'email') {
+            // Simple regex for basic email format check
+            const emailRegex = /^\S+@\S+\.\S+$/;
+            if (value && !emailRegex.test(value)) {
+                setEmailError('Invalid email format');
+            } else {
+                setEmailError(''); // Clear error if valid or empty
+            }
+        }
     };
 
     const handleTherapyChange = (value: string) => {
@@ -68,6 +81,8 @@ export default function StepAttendeeInfo({ formData, updateFormData }: StepAtten
                         required
                         className="mt-1"
                     />
+                    {/* Display email error message */}
+                    {emailError && <p className="text-red-500 text-xs mt-1">{emailError}</p>}
                 </div>
                 <div>
                     <Label htmlFor="phone">Phone Number</Label>
@@ -91,8 +106,8 @@ export default function StepAttendeeInfo({ formData, updateFormData }: StepAtten
                     onValueChange={handleTherapyChange}
                     required
                 >
-                    <SelectTrigger id="therapy-select" className="w-full mt-1">
-                        <SelectValue placeholder="Select a therapy..." />
+                    <SelectTrigger id="therapy-select" className="w-full mt-1 border-gray-400">
+                        <SelectValue placeholder="Select therapy..." />
                     </SelectTrigger>
                     <SelectContent>
                         {IV_THERAPIES.map((therapy) => (

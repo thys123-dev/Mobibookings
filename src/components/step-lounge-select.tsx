@@ -42,7 +42,7 @@ export default function StepLoungeSelect({ formData, updateFormData }: StepLoung
                     onValueChange={handleLocationChange}
                     required // Ensure a selection is made
                 >
-                    <SelectTrigger id="lounge-select" className="w-full mt-1">
+                    <SelectTrigger id="lounge-select" className="w-full mt-1 border-gray-400">
                         <SelectValue placeholder="Select a location..." />
                     </SelectTrigger>
                     <SelectContent>

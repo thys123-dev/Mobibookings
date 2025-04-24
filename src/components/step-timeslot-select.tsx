@@ -180,7 +180,7 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
                                         onClick={() => handleSlotSelect(slot.id)}
                                         className="flex flex-col h-auto py-2"
                                     >
-                                        <span>{formatTime(slot.start_time)} - {formatTime(slot.end_time)}</span>
+                                        <span>{formatTime(slot.start_time)}</span>
                                         <span className="text-xs">({slot.remaining_seats} seat{slot.remaining_seats !== 1 ? 's' : ''} left)</span>
                                     </Button>
                                 ))

@@ -27,8 +27,11 @@ const bookingSchema = z.object({
     selectedTimeSlotId: z.string().optional(),
 });
 
+// Infer the TypeScript type from the Zod schema
+type BookingData = z.infer<typeof bookingSchema>;
+
 export async function POST(request: NextRequest) {
-    let bookingData;
+    let bookingData: BookingData; // Explicitly type bookingData
     let supabaseAdmin;
     try {
         supabaseAdmin = getSupabaseAdmin(); // Initialize client early

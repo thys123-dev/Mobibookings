@@ -57,7 +57,7 @@ export default function StepDestination({ formData, updateFormData }: StepDestin
                     onValueChange={handleDestinationChange}
                     required
                 >
-                    <SelectTrigger id="destination-select" className="w-full mt-1">
+                    <SelectTrigger id="destination-select" className="w-full mt-1 border-gray-400">
                         <SelectValue placeholder="Select destination..." />
                     </SelectTrigger>
                     <SelectContent>
@@ -77,7 +77,7 @@ export default function StepDestination({ formData, updateFormData }: StepDestin
                     // Disable if no destination selected OR if mobile is selected
                     disabled={!formData.destinationType || formData.destinationType === 'mobile'}
                 >
-                    <SelectTrigger id="attendee-count" className="w-full mt-1">
+                    <SelectTrigger id="attendee-count" className="w-full mt-1 border-gray-400">
                         <SelectValue placeholder="Select number..." />
                     </SelectTrigger>
                     <SelectContent>

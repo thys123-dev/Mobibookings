@@ -55,7 +55,49 @@ export default function BookingForm() {
         }
     }, [currentStep, formData.destinationType]);
 
+    // --- Step Validation Logic ---
+    const isCurrentStepValid = (): boolean => {
+        const emailRegex = /^\S+@\S+\.\S+$/; // Simple email format check
+
+        switch (currentStep) {
+            case 1:
+                return !!formData.destinationType;
+            case 2:
+                // Valid if mobile, or if lounge and location is selected
+                return formData.destinationType === 'mobile' || !!formData.loungeLocationId;
+            case 3:
+                // Valid if mobile, or if lounge and start time is selected
+                // Note: Assuming selectedStartTime is populated correctly after timeslot selection
+                return formData.destinationType === 'mobile' || !!formData.selectedStartTime;
+            case 4:
+                const basicInfoValid = !!formData.firstName &&
+                    !!formData.lastName &&
+                    !!formData.email &&
+                    !!formData.phone &&
+                    !!formData.therapyType;
+                const emailFormatValid = formData.email ? emailRegex.test(formData.email) : false;
+
+                // TODO: Add mobile address validation here when fields are defined
+                // const mobileAddressValid = formData.destinationType === 'mobile' ? 
+                //                          (!!formData.clientAddressStreet && !!formData.clientAddressCity /*...etc*/) : true;
+
+                return basicInfoValid && emailFormatValid; // && mobileAddressValid;
+            case 5: // Confirmation step, always considered valid to proceed from (to submit)
+                return true;
+            default:
+                return false;
+        }
+    };
+
     const nextStep = () => {
+        // Check validity before proceeding
+        if (!isCurrentStepValid()) {
+            // Optionally show a more specific message or highlight fields
+            // For now, just prevent moving forward
+            console.warn("Step not valid, cannot proceed.");
+            return;
+        }
+
         let nextStepToGo = currentStep + 1;
 
         // Skip steps 2 and 3 if mobile is selected when moving from step 1
@@ -63,32 +105,8 @@ export default function BookingForm() {
             nextStepToGo = 4;
         }
 
-        // Add validation logic here before proceeding if needed
-        let isValid = true;
-        if (currentStep === 1 && !formData.destinationType) {
-            alert("Please select a destination type.");
-            isValid = false;
-        }
-        else if (formData.destinationType === 'lounge') {
-            if (currentStep === 2 && !formData.loungeLocationId) {
-                alert("Please select a lounge location.");
-                isValid = false;
-            }
-            else if (currentStep === 3 && (!formData.selectedDate || !formData.selectedTimeSlotId)) {
-                alert("Please select a date and an available time slot.");
-                isValid = false;
-            }
-        }
-        // Add validation for Step 4 (common to both paths)
-        if (currentStep === 4) {
-            if (!formData.firstName || !formData.lastName || !formData.email || !formData.phone || !formData.therapyType) {
-                alert("Please fill in all your information and select a therapy.");
-                isValid = false;
-            }
-            // Add more specific validation (e.g., email format) if needed
-        }
-
-        if (isValid && nextStepToGo <= TOTAL_STEPS) {
+        // Proceed if step is valid (checked above) and within bounds
+        if (nextStepToGo <= TOTAL_STEPS) {
             setCurrentStep(nextStepToGo);
         }
     };
@@ -240,14 +258,21 @@ export default function BookingForm() {
 
                         {/* Show Next button if not the last step (and not mobile on step 4) */}
                         {(!isLastStep && !isMobilePathLastRelevantStep) && (
-                            <Button onClick={nextStep} disabled={isSubmitting}>
+                            <Button
+                                onClick={nextStep}
+                                disabled={isSubmitting || !isCurrentStepValid()} // Add validation check
+                            >
                                 Next
                             </Button>
                         )}
 
                         {/* Show Submit button on the actual last step OR on step 4 if mobile */}
                         {(isLastStep || isMobilePathLastRelevantStep) && (
-                            <Button onClick={handleSubmit} disabled={isSubmitting}>
+                            <Button
+                                onClick={handleSubmit}
+                                // Also disable submit if step 4 (info) or 5 (confirmation) is invalid, though step 5 is always true
+                                disabled={isSubmitting || !isCurrentStepValid()}
+                            >
                                 {isSubmitting ? 'Submitting...' : 'Submit Booking'}
                             </Button>
                         )}
