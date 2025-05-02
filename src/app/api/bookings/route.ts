@@ -4,18 +4,32 @@ import { getSupabaseAdmin } from '@/lib/database/supabase-client';
 // import { IV_THERAPIES } from '@/lib/constants'; // No longer needed if fetching from DB
 import { createCalendarEvent } from '@/lib/google-calendar'; // Import GCal helper
 // import { BookingFormData } from '@/components/booking-form'; // Type not strictly needed here if using Zod
+// import { AttendeeData } from '@/components/booking-form'; // Maybe import if needed later
+
+// --- NEW: Zod schema for individual attendee details ---
+const attendeeSchema = z.object({
+    firstName: z.string().min(1, { message: "Attendee first name is required" }),
+    lastName: z.string().min(1, { message: "Attendee last name is required" }),
+    treatmentId: z.union([z.number(), z.string()]).refine(val => val !== undefined && val !== null && String(val).length > 0, { message: "Treatment selection is required for each attendee" }),
+    email: z.string().email({ message: "Valid email is required for each attendee" }),
+    phone: z.string().min(1, { message: "Phone number is required for each attendee" }),
+    fluidOption: z.enum(['200ml', '1000ml', '1000ml_dextrose'], { required_error: "Fluid option selection is required for each attendee" }),
+});
 
 // Zod schema for strict validation of incoming data
 const bookingSchema = z.object({
     loungeLocationId: z.string().min(1, { message: "Location ID is required" }),
     selectedStartTime: z.string().datetime({ message: "Valid ISO 8601 start time string is required" }), // Use z.datetime()
     attendeeCount: z.number().int().min(1),
-    firstName: z.string().min(1, { message: "First name is required" }),
-    lastName: z.string().min(1, { message: "Last name is required" }),
-    email: z.string().email({ message: "Valid email is required" }),
-    phone: z.string().min(1, { message: "Phone number is required" }),
-    // therapyType: z.string().min(1, { message: "Therapy type is required" }), // REMOVED
-    treatmentId: z.union([z.number(), z.string()]).refine(val => val !== undefined && val !== null, { message: "Treatment ID is required" }), // ADDED
+    // Primary contact info (read from request, will be overwritten by attendee[0] before DB update)
+    email: z.string().email({ message: "Valid primary contact email is required" }),
+    phone: z.string().min(1, { message: "Valid primary contact phone number is required" }),
+    // --- MODIFIED: Use attendees array ---
+    attendees: z.array(attendeeSchema).min(1, { message: "At least one attendee's details must be provided" }),
+    // --- REMOVED individual fields ---
+    // firstName: z.string().min(1, { message: "First name is required" }),
+    // lastName: z.string().min(1, { message: "Last name is required" }),
+    // treatmentId: z.union([z.number(), z.string()]).refine(val => val !== undefined && val !== null, { message: "Treatment ID is required" }),
     destinationType: z.literal('lounge'),
     // Optional fields from frontend, not strictly needed for backend logic if treatmentId is present
     // treatmentPrice: z.number().optional(),
@@ -27,15 +41,30 @@ const bookingSchema = z.object({
 // Infer the TypeScript type from the Zod schema
 type BookingData = z.infer<typeof bookingSchema>;
 
+// --- NEW: Type for treatment data fetched from DB ---
+interface TreatmentDbInfo {
+    id: number | string;
+    name: string;
+    duration_minutes_1000ml: number; // Using 1000ml as per plan
+}
+
 export async function POST(request: NextRequest) {
     let bookingData: BookingData;
     let supabaseAdmin;
     let newBookingId: number | null = null; // Variable to store the new booking ID
+    // Declare primary contact variables here for wider scope
+    let primaryEmail: string | undefined | null = null;
+    let primaryPhone: string | undefined | null = null;
 
     try {
         supabaseAdmin = getSupabaseAdmin();
         const rawData = await request.json();
         bookingData = bookingSchema.parse(rawData);
+
+        // --- Validation: Ensure attendee array count matches attendeeCount ---
+        if (bookingData.attendees.length !== bookingData.attendeeCount) {
+            return NextResponse.json({ error: 'Attendee details count does not match attendee count.' }, { status: 400 });
+        }
 
         if (bookingData.destinationType !== 'lounge') {
             return NextResponse.json({ error: 'Invalid booking type' }, { status: 400 });
@@ -48,10 +77,13 @@ export async function POST(request: NextRequest) {
                 p_location_id: bookingData.loungeLocationId,
                 p_start_time: bookingData.selectedStartTime,
                 p_attendee_count: bookingData.attendeeCount,
-                p_treatment_id: bookingData.treatmentId,
-                p_user_name: `${bookingData.firstName} ${bookingData.lastName}`,
-                p_user_email: bookingData.email,
-                p_user_phone: bookingData.phone,
+                // Pass Attendee 1 details for unused legacy params
+                p_treatment_id: bookingData.attendees[0]?.treatmentId, // Unused by new RPC but kept for signature match
+                p_user_name: `${bookingData.attendees[0]?.firstName || ''} ${bookingData.attendees[0]?.lastName || ''}`,
+                p_user_email: bookingData.attendees[0]?.email, // Unused
+                p_user_phone: bookingData.attendees[0]?.phone, // Unused
+                // ADDED: Pass the full attendee details array
+                p_attendees_details: bookingData.attendees
             }
         );
 
@@ -75,6 +107,41 @@ export async function POST(request: NextRequest) {
         }
         newBookingId = rpcResult;
 
+        // ---- NEW: Update Booking with Attendee Details and Contact Info ----
+        try {
+            // Ensure primary contact info is taken from the first attendee
+            // Assign values to the variables declared above
+            primaryEmail = bookingData.attendees[0]?.email;
+            primaryPhone = bookingData.attendees[0]?.phone;
+
+            if (!primaryEmail || !primaryPhone) {
+                 // This should ideally be caught by frontend validation, but double-check
+                 console.error(`Booking ${newBookingId}: Missing email or phone for the primary attendee (index 0).`);
+                 // Decide how to handle: fail the request or proceed with missing primary contact?
+                 // Let's fail it for now to ensure data integrity.
+                 return NextResponse.json({ error: 'Primary attendee email and phone are missing.'}, { status: 400 });
+            }
+
+            const { error: updateError } = await supabaseAdmin
+                .from('bookings')
+                .update({
+                    attendees_details: bookingData.attendees, // Store the whole array in JSONB
+                    user_email: primaryEmail, // CORRECTED: Use user_email
+                    user_phone: primaryPhone, // CORRECTED: Use user_phone
+                })
+                .eq('id', newBookingId);
+
+            if (updateError) {
+                // Log the error, maybe try to roll back or notify admin?
+                // For now, log and continue, but the booking record will be incomplete.
+                console.error(`Failed to update booking ${newBookingId} with attendee details:`, updateError.message);
+                // Potentially return an error here if this update is critical
+                // return NextResponse.json({ error: 'Failed to save attendee details.', details: updateError.message }, { status: 500 });
+            }
+        } catch(updateCatchError: any) {
+             console.error(`Exception during booking update for ${newBookingId}:`, updateCatchError.message);
+        }
+
         // ---- Google Calendar Event Creation ----
         let googleEventId: string | null = null;
         try {
@@ -85,27 +152,63 @@ export async function POST(request: NextRequest) {
                 .eq('id', bookingData.loungeLocationId)
                 .single();
 
-            // Fetch treatment name
-            const { data: treatmentData, error: treatmentError } = await supabaseAdmin
+            // Fetch treatment names AND durations for ALL attendees
+            const uniqueTreatmentIds = Array.from(new Set(bookingData.attendees.map(a => a.treatmentId)));
+            const { data: treatmentsData, error: treatmentsError } = await supabaseAdmin
                 .from('treatments')
-                .select('name')
-                .eq('id', bookingData.treatmentId)
-                .single();
-                
-            // --- Calculate End Time for GCal ---
-            // Fetch the start times and end times of the booked slots based on the booking
-            // This assumes the RPC function correctly updated the booked_counts
-            const slotsNeeded = Math.ceil(bookingData.attendeeCount / 2.0);
+                .select('id, name, duration_minutes_1000ml') // Select name and duration
+                .in('id', uniqueTreatmentIds);
+
+            if (treatmentsError || !treatmentsData) {
+                 throw new Error(`Failed to fetch treatment details: ${treatmentsError?.message}`);
+            }
+
+            // Create a map for easy lookup
+            const treatmentInfoMap = new Map<string | number, TreatmentDbInfo>();
+            treatmentsData.forEach(t => treatmentInfoMap.set(t.id, t));
+
+            // --- Fetch treatment durations (both 200ml and 1000ml) ---
+             const { data: treatmentsDurationData, error: treatmentsDurationError } = await supabaseAdmin
+                .from('treatments')
+                .select('id, name, duration_minutes_200ml, duration_minutes_1000ml') // Select both durations
+                .in('id', uniqueTreatmentIds);
+
+            if (treatmentsDurationError || !treatmentsDurationData) {
+                 throw new Error(`Failed to fetch treatment durations: ${treatmentsDurationError?.message}`);
+            }
+            const treatmentDurationMap = new Map<string | number, { name: string, duration_200: number, duration_1000: number}>();
+            treatmentsDurationData.forEach(t => treatmentDurationMap.set(t.id, { name: t.name, duration_200: t.duration_minutes_200ml, duration_1000: t.duration_minutes_1000ml }));
+
+            // --- CORRECTED: Calculate finalSlotsNeeded for GCal End Time --- 
+            let max_duration_gcal = 0;
+            for (const attendee of bookingData.attendees) {
+                 const lookupIdGcal = typeof attendee.treatmentId === 'string' ? parseInt(attendee.treatmentId, 10) : attendee.treatmentId;
+                 const durationInfoGcal = treatmentDurationMap.get(lookupIdGcal);
+                 if (durationInfoGcal) {
+                    const currentDurationGcal = attendee.fluidOption === '200ml' 
+                        ? durationInfoGcal.duration_200 
+                        : durationInfoGcal.duration_1000;
+                    max_duration_gcal = Math.max(max_duration_gcal, currentDurationGcal);
+                 } 
+                 // No need to error here as treatment presence is validated earlier
+            }
+            const durationSlotsNeededGcal = (max_duration_gcal > 30) ? 2 : 1;
+            const capacitySlotsNeededGcal = Math.ceil(bookingData.attendeeCount / 2.0);
+            const finalSlotsNeededGcal = Math.max(durationSlotsNeededGcal, capacitySlotsNeededGcal);
+            // --- END Calculation --- 
+
+            // Fetch the start times and end times of the booked slots using the CORRECT number of slots
+            // const slotsNeeded = Math.ceil(bookingData.attendeeCount / 2.0); // OLD calculation
             const { data: bookedSlotsData, error: bookedSlotsError } = await supabaseAdmin
                 .from('time_slots')
                 .select('start_time, end_time')
                 .eq('location_id', bookingData.loungeLocationId)
                 .gte('start_time', bookingData.selectedStartTime)
                 .order('start_time', { ascending: true })
-                .limit(slotsNeeded);
+                .limit(finalSlotsNeededGcal); // <<< CORRECTED: Use finalSlotsNeededGcal
 
-            if (bookedSlotsError || !bookedSlotsData || bookedSlotsData.length < slotsNeeded) {
-                 throw new Error(`Failed to fetch details of booked slots for booking ${newBookingId}: ${bookedSlotsError?.message}`);
+            if (bookedSlotsError || !bookedSlotsData || bookedSlotsData.length < finalSlotsNeededGcal) { // Check against finalSlotsNeededGcal
+                 throw new Error(`Failed to fetch details of booked slots (required: ${finalSlotsNeededGcal}) for booking ${newBookingId}: ${bookedSlotsError?.message}`);
             }
             const endTime = bookedSlotsData[bookedSlotsData.length - 1].end_time; // Get end time of the last slot in the block
 
@@ -116,21 +219,67 @@ export async function POST(request: NextRequest) {
             if (!endTime) {
                  throw new Error(`Missing end_time for the last booked slot`);
             }
-            if (treatmentError || !treatmentData) {
-                throw new Error(`Failed to fetch treatment name for ID ${bookingData.treatmentId}: ${treatmentError?.message}`);
+            if (treatmentInfoMap.size !== uniqueTreatmentIds.length) {
+                 // Check if we found info for all requested unique treatments
+                 console.warn(`Could not find details for all treatment IDs requested. Found: ${treatmentInfoMap.size}, Requested unique: ${uniqueTreatmentIds.length}`);
+                 // Decide if this is a fatal error or just continue with partial info
             }
 
-            const therapyName = treatmentData.name;
-            const eventSummary = `IV Booking - ${bookingData.firstName} ${bookingData.lastName}`;
-            const eventDescription =
-                `Booking Details:\n` +
-                `Name: ${bookingData.firstName} ${bookingData.lastName}\n` +
-                `Email: ${bookingData.email}\n` +
-                `Phone: ${bookingData.phone}\n` +
-                `Attendees: ${bookingData.attendeeCount}\n` +
-                `Therapy: ${therapyName}\n` +
-                `Location: ${locationData.name}\n` +
-                `Booking ID: ${newBookingId}`;
+            // Use first attendee's name for primary identification in summary
+            const primaryAttendee = bookingData.attendees[0];
+            let eventSummary = `IV Booking - ${primaryAttendee.firstName} ${primaryAttendee.lastName}`;
+            if(bookingData.attendeeCount > 1) {
+                 eventSummary += ` (+${bookingData.attendeeCount - 1} others)`;
+            }
+
+            // Build detailed description
+            let eventDescription =
+                `Booking Details:
+` +
+                `Primary Contact (Attendee 1):
+` + // Clarify it's Attendee 1
+                `  Email: ${primaryEmail || 'N/A'}
+` + // Use primaryEmail variable (add fallback)
+                `  Phone: ${primaryPhone || 'N/A'}
+` + // Use primaryPhone variable (add fallback)
+                `Total Attendees: ${bookingData.attendeeCount}
+` +
+                `Location: ${locationData.name}
+` +
+                `Booking ID: ${newBookingId}
+
+` +
+                `Attendees & Treatments:
+`;
+
+            bookingData.attendees.forEach((attendee, index) => {
+                // Convert attendee.treatmentId (likely string) to number for map lookup
+                const lookupId = typeof attendee.treatmentId === 'string' ? parseInt(attendee.treatmentId, 10) : attendee.treatmentId;
+                const treatmentDetails = treatmentDurationMap.get(lookupId);
+                const treatmentName = treatmentDetails ? treatmentDetails.name : `Unknown Treatment (ID: ${attendee.treatmentId})`;
+                
+                // Determine correct duration based on fluidOption
+                let duration = 'N/A';
+                if (treatmentDetails && attendee.fluidOption) {
+                   duration = attendee.fluidOption === '200ml' 
+                                ? `${treatmentDetails.duration_200} minutes` 
+                                : `${treatmentDetails.duration_1000} minutes`;
+                }
+                
+                // ADDED: Include email/phone/fluid/duration in GCal description per attendee
+                eventDescription += `  ${index + 1}. ${attendee.firstName} ${attendee.lastName}
+` +
+                                  `     Email: ${attendee.email}
+` +
+                                  `     Phone: ${attendee.phone}
+` +
+                                  `     Treatment: ${treatmentName}
+` +
+                                  `     Fluid: ${attendee.fluidOption || 'N/A'} ${attendee.fluidOption === '1000ml_dextrose' ? '(+Dextrose)' : ''}
+` +
+                                  `     Duration: ${duration}
+`;
+            });
 
             googleEventId = await createCalendarEvent({
                 calendarId: locationData.google_calendar_id,
@@ -138,7 +287,7 @@ export async function POST(request: NextRequest) {
                 endTime: endTime, // Use end_time fetched from DB
                 summary: eventSummary,
                 description: eventDescription,
-                attendeeEmail: bookingData.email
+                attendeeEmail: primaryEmail || bookingData.email // Use primary email, fallback to original top-level email if needed
             });
 
             // Update the booking record with the Google Event ID

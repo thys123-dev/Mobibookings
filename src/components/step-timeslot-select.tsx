@@ -13,16 +13,24 @@ import {
     PopoverContent,
     PopoverTrigger,
 } from "@/components/ui/popover"; // Import Popover components
-import { BookingFormData } from './booking-form';
+import { BookingFormData, AttendeeData } from './booking-form'; // Import AttendeeData
 
 // Define the structure of a time slot received from the API
 interface TimeSlot {
     id: string | number; // Match DB schema
     start_time: string; // ISO 8601 string
     end_time: string; // ISO 8601 string
-    capacity: number;
-    booked_count: number;
-    remaining_seats: number;
+    // No longer necessarily includes remaining_seats from the backend
+    // capacity: number;
+    // booked_count: number;
+    // remaining_seats: number;
+}
+
+// --- NEW: Type for the data sent to availability API ---
+interface AvailabilityRequestData {
+    locationId: string;
+    date: string;
+    attendees: Pick<AttendeeData, 'treatmentId' | 'fluidOption'>[]; // Only need these fields
 }
 
 interface StepTimeslotSelectProps {
@@ -38,30 +46,52 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
     const [isPopoverOpen, setIsPopoverOpen] = useState(false); // Control popover state
 
     const locationId = formData.loungeLocationId;
-    const attendees = formData.attendeeCount || 1; // Default to 1 if not set
+    // const attendeesCount = formData.attendeeCount || 1; // No longer used directly for API call
+    const attendeesDetails = formData.attendees || []; // Use the attendee details array
 
     useEffect(() => {
-        // Fetch availability when date or location changes
-        if (selectedDate && locationId) {
+        // Fetch availability when date, location, or relevant attendee details change
+        // Check if all attendees have treatmentId and fluidOption before fetching
+        const canFetch = selectedDate && locationId && attendeesDetails.length > 0 && 
+                       attendeesDetails.every(a => a.treatmentId && a.fluidOption);
+                       
+        if (canFetch) {
             fetchAvailability(selectedDate);
+        } else {
+            setAvailableSlots([]); // Clear slots if required data is missing
+            updateFormData({ selectedTimeSlotId: undefined, selectedStartTime: undefined });
         }
-        // Clear slots if date is cleared
-        if (!selectedDate) {
-            setAvailableSlots([]);
-            updateFormData({ selectedTimeSlotId: undefined }); // Clear selected slot if date changes
-        }
-    }, [selectedDate, locationId]);
+        // Trigger fetch if date, location, or attendee details change
+    }, [selectedDate, locationId, attendeesDetails]); // Add attendeesDetails dependency
 
     const fetchAvailability = async (date: Date) => {
         setIsLoading(true);
         setError(null);
         setAvailableSlots([]); // Clear previous slots
-        updateFormData({ selectedTimeSlotId: undefined }); // Clear selection on new fetch
+        updateFormData({ selectedTimeSlotId: undefined, selectedStartTime: undefined }); // Clear selection on new fetch
 
         const dateString = format(date, 'yyyy-MM-dd');
+        
+        // Prepare data for POST request
+        const requestBody: AvailabilityRequestData = {
+            locationId: locationId!,
+            date: dateString,
+            attendees: attendeesDetails.map(a => ({
+                treatmentId: a.treatmentId!,
+                fluidOption: a.fluidOption!
+            }))
+        };
 
         try {
-            const response = await fetch(`/api/availability?locationId=${locationId}&date=${dateString}&attendeeCount=${attendees}`);
+            // --- UPDATED: Use POST request --- 
+            const response = await fetch('/api/availability', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            });
+
             if (!response.ok) {
                 const errorData = await response.json();
                 throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
@@ -121,14 +151,17 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
         }
     };
 
-    // This step should only render if destinationType is 'lounge'
-    if (formData.destinationType !== 'lounge' || !locationId) {
-        return <div className="text-red-500">Error: Lounge location must be selected first.</div>;
+    // --- Check if prerequisite data is available --- 
+    const prerequisiteMissing = !locationId || attendeesDetails.length === 0 || attendeesDetails.some(a => !a.treatmentId || !a.fluidOption);
+
+    if (formData.destinationType !== 'lounge') {
+        // This case should ideally not be reached due to form flow logic
+        return null; 
     }
 
     return (
         <div className="space-y-6">
-            <h2 className="text-xl font-semibold">Step 3: Select Date & Time Slot</h2>
+            <h2 className="text-xl font-semibold">Step 4: Select Date & Time Slot</h2> {/* Updated Step number? Check booking-form.tsx */} 
 
             {/* Date Selection using Popover */}
             <div>
@@ -161,13 +194,17 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
             </div>
 
             {/* Time Slot Selection */}
-            {selectedDate && (
+            {prerequisiteMissing && (
+                 <p className="text-sm text-orange-600">Please ensure location and all attendee treatment/fluid details are selected in previous steps.</p>
+            )}
+
+            {!prerequisiteMissing && selectedDate && (
                 <div className="space-y-3">
                     <Label>Select an Available Time Slot for {format(selectedDate, 'PPP')}</Label>
                     {isLoading && <p>Loading slots...</p>}
                     {error && <p className="text-red-500">Error: {error}</p>}
                     {!isLoading && !error && availableSlots.length === 0 && (
-                        <p className="text-gray-600">No available slots found for {attendees} attendee{attendees !== 1 ? 's' : ''} on this date.</p>
+                        <p className="text-gray-600">No available slots found matching the required duration and capacity for all attendees on this date.</p> // Updated message
                     )}
                     {!isLoading && !error && availableSlots.length > 0 && (
                         <div className="grid grid-cols-3 gap-3">
@@ -177,10 +214,11 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
                                         key={slot.id}
                                         variant={formData.selectedTimeSlotId === String(slot.id) ? "default" : "outline"}
                                         onClick={() => handleSlotSelect(slot.id)}
-                                        className="flex flex-col h-auto py-2"
+                                        // Removed explicit height/py classes for default button sizing
                                     >
-                                        <span>{formatTime(slot.start_time)}</span>
-                                        <span className="text-xs">({slot.remaining_seats} seat{slot.remaining_seats !== 1 ? 's' : ''} left)</span>
+                                        {formatTime(slot.start_time)}
+                                        {/* Removed seat count as it's no longer reliable/provided */}
+                                        {/* <span className="text-xs">({slot.remaining_seats} seat{slot.remaining_seats !== 1 ? 's' : ''} left)</span> */}
                                     </Button>
                                 ))
                             }
@@ -190,8 +228,8 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
             )}
 
             {/* Display message if no date/slot selected */}
-            {!selectedDate && <p className="text-sm text-gray-600">Please select a date.</p>}
-            {selectedDate && !formData.selectedTimeSlotId && !isLoading && availableSlots.length > 0 && (
+            {!prerequisiteMissing && !selectedDate && <p className="text-sm text-gray-600">Please select a date.</p>}
+            {!prerequisiteMissing && selectedDate && !formData.selectedTimeSlotId && !isLoading && availableSlots.length > 0 && (
                 <p className="text-sm text-gray-600">Please select an available time slot.</p>
             )}
         </div>

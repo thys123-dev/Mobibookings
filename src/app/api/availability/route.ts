@@ -1,41 +1,91 @@
 import { supabase } from '@/lib/database/supabase-client';
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod'; // Import Zod
 
-export async function GET(request: NextRequest) {
-    const { searchParams } = new URL(request.url);
-    const locationId = searchParams.get('locationId');
-    const date = searchParams.get('date'); // Expecting YYYY-MM-DD format
-    const attendeeCountParam = searchParams.get('attendeeCount');
+// --- NEW: Define schema for attendee data needed for availability ---
+const attendeeAvailabilitySchema = z.object({
+    treatmentId: z.union([z.number(), z.string()]), // Allow number or string ID
+    fluidOption: z.enum(['200ml', '1000ml', '1000ml_dextrose']),
+    // We don't need name/email/phone here, just treatment/fluid
+});
 
-    if (!locationId || !date) {
-        return NextResponse.json({ error: 'Missing locationId or date parameter' }, { status: 400 });
-    }
+const availabilityRequestSchema = z.object({
+    locationId: z.string(),
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, { message: "Invalid date format, use YYYY-MM-DD" }),
+    attendees: z.array(attendeeAvailabilitySchema).min(1, { message: "At least one attendee is required" }),
+});
 
-    // Validate date format (basic check)
-    if (!/\d{4}-\d{2}-\d{2}/.test(date)) {
-        return NextResponse.json({ error: 'Invalid date format, use YYYY-MM-DD' }, { status: 400 });
-    }
+// Type for treatment duration data fetched from DB
+interface TreatmentDurationInfo {
+    id: number | string;
+    duration_minutes_200ml: number;
+    duration_minutes_1000ml: number;
+}
 
-    // Validate and parse attendeeCount, default to 1 if invalid or missing
-    let attendeeCount = 1;
-    if (attendeeCountParam) {
-        const parsedCount = parseInt(attendeeCountParam, 10);
-        if (!isNaN(parsedCount) && parsedCount > 0) {
-            attendeeCount = parsedCount;
-        } else {
-            // Optional: return error for invalid attendee count?
-            console.warn(`Invalid attendeeCount param: ${attendeeCountParam}. Defaulting to 1.`);
-        }
-    }
+
+export async function POST(request: NextRequest) { // Changed to POST to accept body
+    let requestData: z.infer<typeof availabilityRequestSchema>;
 
     try {
-        // Construct the start and end timestamps for the given date
-        // Important: Adjust timezone handling if necessary based on how times are stored/queried
+        // --- Parse and Validate Input Data --- 
+        const rawData = await request.json();
+        requestData = availabilityRequestSchema.parse(rawData);
+        const { locationId, date, attendees } = requestData;
+        const attendeeCount = attendees.length;
+
+        // --- Fetch Treatment Durations --- 
+        const uniqueTreatmentIds = Array.from(new Set(attendees.map(a => 
+            typeof a.treatmentId === 'string' ? parseInt(a.treatmentId, 10) : a.treatmentId
+        )));
+
+        if (uniqueTreatmentIds.some(isNaN)) {
+            return NextResponse.json({ error: 'Invalid Treatment ID found.' }, { status: 400 });
+        }
+
+        const { data: treatmentDurations, error: durationError } = await supabase
+            .from('treatments')
+            .select('id, duration_minutes_200ml, duration_minutes_1000ml')
+            .in('id', uniqueTreatmentIds);
+
+        if (durationError) {
+            console.error('Supabase error fetching treatment durations:', durationError);
+            throw durationError;
+        }
+        if (!treatmentDurations || treatmentDurations.length !== uniqueTreatmentIds.length) {
+             console.warn('Could not fetch duration info for all requested treatments.');
+             // Return error or empty list if treatments are essential?
+             return NextResponse.json({ error: 'Could not find duration details for all selected treatments.' }, { status: 404 });
+        }
+
+        const durationMap = new Map<string | number, TreatmentDurationInfo>();
+        treatmentDurations.forEach(t => durationMap.set(t.id, t));
+
+        // --- Calculate Max Duration & Slots Needed --- 
+        let max_duration = 0;
+        for (const attendee of attendees) {
+            const lookupId = typeof attendee.treatmentId === 'string' ? parseInt(attendee.treatmentId, 10) : attendee.treatmentId;
+            const durationInfo = durationMap.get(lookupId);
+            if (durationInfo) {
+                const currentDuration = attendee.fluidOption === '200ml' 
+                    ? durationInfo.duration_minutes_200ml 
+                    : durationInfo.duration_minutes_1000ml;
+                max_duration = Math.max(max_duration, currentDuration);
+            } else {
+                // Handle case where duration info wasn't found (should have errored earlier, but belt-and-suspenders)
+                console.error(`Duration info not found for treatment ID ${lookupId} during max_duration calculation.`);
+                // Maybe return error here
+            }
+        }
+
+        const durationSlotsNeeded = (max_duration > 30) ? 2 : 1;
+        const capacitySlotsNeeded = Math.ceil(attendeeCount / 2.0);
+        const finalSlotsNeeded = Math.max(durationSlotsNeeded, capacitySlotsNeeded);
+
+        // --- Fetch All Time Slots for the Day --- 
         const startOfDay = `${date}T00:00:00Z`;
         const endOfDay = `${date}T23:59:59Z`;
 
-        // Fetch all slots for the day for the location
-        const { data: allTimeSlots, error } = await supabase
+        const { data: allTimeSlots, error: slotsError } = await supabase
             .from('time_slots')
             .select('id, start_time, end_time, capacity, booked_count')
             .eq('location_id', locationId)
@@ -43,53 +93,36 @@ export async function GET(request: NextRequest) {
             .lte('start_time', endOfDay)
             .order('start_time', { ascending: true });
 
-        if (error) {
-            console.error('Supabase error fetching slots:', error);
-            throw error; // Throw error to be caught by the outer catch block
+        if (slotsError) {
+            console.error('Supabase error fetching slots:', slotsError);
+            throw slotsError;
         }
 
-        if (!allTimeSlots) {
-            return NextResponse.json([]); // Return empty if no slots found
+        if (!allTimeSlots || allTimeSlots.length === 0) {
+            return NextResponse.json([]); // No slots available for this day/location
         }
 
-        let availableStartingSlots = [];
-
-        if (attendeeCount <= 2) {
-            // --- Original Logic for 1-2 Attendees ---
-            availableStartingSlots = allTimeSlots
-                .filter(slot => (slot.capacity - slot.booked_count) >= attendeeCount)
-                .map(slot => ({
-                    ...slot,
-                    remaining_seats: slot.capacity - slot.booked_count
-                }));
-        } else {
-            // --- New Logic for > 2 Attendees (Consecutive Slots) ---
-            const slotsNeeded = Math.ceil(attendeeCount / 2.0);
+        // --- Filter Available Starting Slots --- 
+        const availableStartingSlots = [];
+        for (let i = 0; i <= allTimeSlots.length - finalSlotsNeeded; i++) {
+            const potentialBlock = allTimeSlots.slice(i, i + finalSlotsNeeded);
             
-            for (let i = 0; i <= allTimeSlots.length - slotsNeeded; i++) {
-                const potentialBlock = allTimeSlots.slice(i, i + slotsNeeded);
-                
-                // Basic check: Ensure the block is truly consecutive based on time
-                // This requires assuming slot durations are consistent (e.g., 30 mins)
-                // A more robust check would compare end_time of slot j with start_time of j+1
-                // For now, we rely on the ordered fetch and limit.
-                
-                // Calculate combined capacity for the block
-                const combinedCapacity = potentialBlock.reduce((sum, slot) => sum + (slot.capacity - slot.booked_count), 0);
-
-                if (combinedCapacity >= attendeeCount) {
-                    // The first slot of this block is a valid starting point
+            // Check 1: EVERY slot in the block must have at least one seat available
+            const blockHasMinimumCapacity = potentialBlock.every(slot => slot.capacity > slot.booked_count);
+            
+            if (blockHasMinimumCapacity) {
+                 // Check 2: The TOTAL available seats across the block must be >= attendeeCount
+                 const totalAvailableSeatsInBlock = potentialBlock.reduce((sum, slot) => sum + (slot.capacity - slot.booked_count), 0);
+                 
+                 if (totalAvailableSeatsInBlock >= attendeeCount) {
+                    // BOTH checks passed, this is a valid starting slot
                     const startingSlot = potentialBlock[0];
                     availableStartingSlots.push({
-                        ...startingSlot,
-                        // Indicate capacity relative to the *block* for this request
-                        // Note: Displaying individual remaining seats might be confusing here
-                        // We could add a property like `books_slots: slotsNeeded`?
-                        // For now, just return the starting slot's details.
-                        remaining_seats: startingSlot.capacity - startingSlot.booked_count // Or calculate block capacity?
+                        id: startingSlot.id,
+                        start_time: startingSlot.start_time,
+                        end_time: startingSlot.end_time,
+                        // Omit remaining_seats to avoid confusion
                     });
-                    // Optimization: Should we skip checking the next slot if it was part of this block?
-                    // For now, simple iteration is fine.
                 }
             }
         }
@@ -97,7 +130,12 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(availableStartingSlots);
 
     } catch (error: any) {
+        if (error instanceof z.ZodError) {
+            console.error('Availability Zod Validation Errors:', error.errors);
+            return NextResponse.json({ error: 'Invalid input data', details: error.errors }, { status: 400 });
+        }
         console.error('Error in /api/availability:', error);
-        return NextResponse.json({ error: 'Failed to fetch availability', details: error.message }, { status: 500 });
+        const message = error.message || 'An unknown error occurred.';
+        return NextResponse.json({ error: 'Failed to fetch availability', details: message }, { status: 500 });
     }
 } 

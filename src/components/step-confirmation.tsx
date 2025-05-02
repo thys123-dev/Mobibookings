@@ -4,11 +4,22 @@ import React from 'react';
 import { format, parseISO, isValid } from 'date-fns';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import { BookingFormData } from './booking-form';
+import { BookingFormData, AttendeeData } from './booking-form';
 import { LOUNGE_LOCATIONS } from '@/lib/constants';
+
+// Reuse the Treatment interface (ideally imported from types.ts)
+// Define it here temporarily if not passed down or imported
+interface Treatment {
+  id: number | string;
+  name: string;
+  price: number;
+  duration_minutes_200ml: number; // Keep both for potential future use
+  duration_minutes_1000ml: number;
+}
 
 interface StepConfirmationProps {
     formData: BookingFormData;
+    treatmentsList: Treatment[];
 }
 
 // Helper function to find name from ID
@@ -16,7 +27,7 @@ const findNameById = (id: string | undefined, list: { id: string; name: string }
     return list.find(item => item.id === id)?.name || 'N/A';
 };
 
-export default function StepConfirmation({ formData }: StepConfirmationProps) {
+export default function StepConfirmation({ formData, treatmentsList }: StepConfirmationProps) {
 
     const {
         destinationType,
@@ -24,13 +35,9 @@ export default function StepConfirmation({ formData }: StepConfirmationProps) {
         loungeLocationId,
         selectedDate,
         selectedStartTime,
-        firstName,
-        lastName,
         email,
         phone,
-        treatmentName,
-        treatmentPrice,
-        treatmentDuration
+        attendees
     } = formData;
 
     // Helper to format time, duplicated from StepTimeslotSelect for now
@@ -50,9 +57,17 @@ export default function StepConfirmation({ formData }: StepConfirmationProps) {
     const selectedLocationName = findNameById(loungeLocationId, LOUNGE_LOCATIONS);
     const formattedDate = selectedDate ? format(selectedDate, 'PPP') : 'N/A'; // e.g., Apr 14th, 2025
 
+    // --- NEW: Helper to get treatment details --- 
+    const getTreatmentDetails = (treatmentId: number | string | undefined): Treatment | undefined => {
+        if (!treatmentId || !treatmentsList) return undefined;
+        return treatmentsList.find(t => String(t.id) === String(treatmentId));
+    }
+
+    const DEXTROSE_EXTRA_COST = 200; // Define cost here too for consistency
+
     return (
         <div className="space-y-6">
-            <h2 className="text-xl font-semibold">Step 6: Confirm Your Booking Details</h2>
+            <h2 className="text-xl font-semibold">Step 5: Confirm Your Booking Details</h2>
 
             <Card>
                 <CardHeader>
@@ -63,7 +78,7 @@ export default function StepConfirmation({ formData }: StepConfirmationProps) {
                         <Label>Destination:</Label>
                         <span>{destinationType === 'lounge' ? 'Treatment Lounge' : 'Mobile Service'}</span>
 
-                        <Label>Attendees:</Label>
+                        <Label>Total Attendees:</Label>
                         <span>{attendeeCount || 'N/A'}</span>
 
                         {destinationType === 'lounge' && (
@@ -82,31 +97,77 @@ export default function StepConfirmation({ formData }: StepConfirmationProps) {
 
                     <hr />
 
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                        <Label>First Name:</Label>
-                        <span>{firstName || 'N/A'}</span>
+                    {/* REMOVED: Primary Contact Details section */}
+                    {/* <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                         <Label>Contact Email:</Label>
+                         <span>{email || 'N/A'}</span>
 
-                        <Label>Last Name:</Label>
-                        <span>{lastName || 'N/A'}</span>
+                         <Label>Contact Phone:</Label>
+                         <span>{phone || 'N/A'}</span>
+                    </div> */}
+                </CardContent>
+            </Card>
 
-                        <Label>Email:</Label>
-                        <span>{email || 'N/A'}</span>
+            <Card>
+                <CardHeader>
+                    <CardTitle className="text-lg">Attendee Details</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    {!attendees || attendees.length === 0 ? (
+                        <p className="text-gray-600">No attendee details provided.</p>
+                    ) : (
+                        attendees.map((attendee, index) => {
+                            const treatment = getTreatmentDetails(attendee.treatmentId);
+                            
+                            // Calculate display price and duration based on fluid option
+                            let displayPrice = treatment?.price;
+                            if (attendee.fluidOption === '1000ml_dextrose' && displayPrice !== undefined) {
+                                displayPrice += DEXTROSE_EXTRA_COST;
+                            }
 
-                        <Label>Phone:</Label>
-                        <span>{phone || 'N/A'}</span>
+                            let displayDuration = undefined;
+                            if (treatment && attendee.fluidOption) {
+                                displayDuration = attendee.fluidOption === '200ml' 
+                                    ? treatment.duration_minutes_200ml 
+                                    : treatment.duration_minutes_1000ml; // Use 1000ml for both 1000ml options
+                            }
+                            
+                            // Format fluid option text
+                            let fluidText = attendee.fluidOption || 'N/A';
+                            if (attendee.fluidOption === '1000ml_dextrose') {
+                                fluidText = '1000ml + Dextrose';
+                            }
 
-                        <Label>Treatment:</Label>
-                        <span>{treatmentName || 'N/A'}</span>
+                            return (
+                                <div key={index} className="p-3 border rounded-md bg-muted/30 space-y-2">
+                                     <h4 className="font-medium">Attendee {index + 1}: {attendee.firstName || 'N/A'} {attendee.lastName || 'N/A'}</h4>
+                                     <div className="grid grid-cols-[auto_1fr] gap-x-2 text-sm">
+                                         <Label className="text-right">Treatment:</Label>
+                                         <span>{treatment?.name || 'N/A'}</span>
 
-                        <Label>Price:</Label>
-                        <span>{treatmentPrice !== undefined ? `R ${treatmentPrice.toFixed(2)}` : 'N/A'}</span>
+                                         {/* ADDED: Display Fluid Option */}
+                                        <Label className="text-right">Fluid:</Label>
+                                        <span>{fluidText}</span>
 
-                        <Label>Duration:</Label>
-                        <span>{treatmentDuration !== undefined ? `${treatmentDuration} minutes` : 'N/A'}</span>
-                    </div>
+                                         <Label className="text-right">Price:</Label>
+                                         <span>{displayPrice !== undefined ? `R ${displayPrice.toFixed(2)}` : 'N/A'}</span>
 
-                    <p className="text-xs text-gray-600 pt-4">Please review your details carefully. Clicking "Submit Booking" will finalize your request.</p>
+                                         <Label className="text-right">Duration:</Label>
+                                         {/* CORRECTED: Displaying calculated duration */}
+                                         <span>{displayDuration !== undefined ? `${displayDuration} minutes` : 'N/A'}</span>
 
+                                        {/* Display Email and Phone per attendee */}
+                                        <Label className="text-right">Email:</Label>
+                                        <span>{attendee.email || 'N/A'}</span>
+
+                                        <Label className="text-right">Phone:</Label>
+                                        <span>{attendee.phone || 'N/A'}</span>
+                                     </div>
+                                </div>
+                            );
+                        })
+                    )}
+                    <p className="text-xs text-gray-600 pt-4">Please review all details carefully. Clicking "Submit Booking" will finalize your request.</p>
                 </CardContent>
             </Card>
         </div>
