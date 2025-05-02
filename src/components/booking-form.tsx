@@ -4,10 +4,21 @@ import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import StepDestination from './step-destination';
+import StepTreatmentSelect from './step-treatment-select';
 import StepLoungeSelect from './step-lounge-select';
 import StepTimeslotSelect from './step-timeslot-select';
 import StepAttendeeInfo from './step-attendee-info';
 import StepConfirmation from './step-confirmation';
+
+// --- NEW: Define Treatment Type ---
+// Ideally move this to src/lib/types.ts later
+interface Treatment {
+  id: number; // Or string if using UUIDs
+  name: string;
+  price: number;
+  duration_minutes_200ml: number;
+  duration_minutes_1000ml: number;
+}
 
 // Define a type for the form data
 // Expand this as more fields are added
@@ -22,10 +33,13 @@ export interface BookingFormData {
     lastName?: string;
     email?: string;
     phone?: string;
-    therapyType?: string;
+    treatmentId?: number | string; // Match Treatment['id'] type
+    treatmentName?: string; // --- ADDED: Treatment Name ---
+    treatmentPrice?: number;
+    treatmentDuration?: number; // We'll decide later which duration (200/1000) is stored/used
 }
 
-const TOTAL_STEPS = 5; // Keep total steps for overall structure, logic will handle skipping
+const TOTAL_STEPS = 6; // --- UPDATE TOTAL STEPS ---
 
 export default function BookingForm() {
     const [currentStep, setCurrentStep] = useState(1);
@@ -34,18 +48,48 @@ export default function BookingForm() {
     const [submissionError, setSubmissionError] = useState<string | null>(null);
     const [bookingSuccess, setBookingSuccess] = useState(false);
 
+    // --- NEW: State for treatments ---
+    const [treatmentsList, setTreatmentsList] = useState<Treatment[]>([]);
+    const [isLoadingTreatments, setIsLoadingTreatments] = useState(true);
+    const [treatmentError, setTreatmentError] = useState<string | null>(null);
+
     // Function to update form data
     const updateFormData = (newData: Partial<BookingFormData>) => {
         setFormData(prev => ({ ...prev, ...newData }));
     };
 
+    // --- NEW: useEffect to fetch treatments ---
+    useEffect(() => {
+      const fetchTreatments = async () => {
+        setIsLoadingTreatments(true);
+        setTreatmentError(null);
+        try {
+          const response = await fetch('/api/treatments');
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || `HTTP error ${response.status}`);
+          }
+          const data: Treatment[] = await response.json();
+          setTreatmentsList(data);
+        } catch (error: any) {
+          console.error("Failed to fetch treatments:", error);
+          setTreatmentError(error.message || "Could not load treatments.");
+        } finally {
+          setIsLoadingTreatments(false);
+        }
+      };
+
+      fetchTreatments();
+    }, []); // Empty dependency array means run once on mount
+
     // Automatically skip steps if mobile is selected
     // This is a bit complex, managing step transitions might need refinement
     useEffect(() => {
         if (formData.destinationType === 'mobile') {
-            // If user selected mobile and somehow ended up on step 2 or 3, redirect to 4
-            if (currentStep === 2 || currentStep === 3) {
-                setCurrentStep(4);
+            // If user selected mobile and somehow ended up on step 3 (Lounge Select) or 4 (Timeslot),
+            // redirect to step 5 (Attendee Info)
+            if (currentStep === 3 || currentStep === 4) {
+                setCurrentStep(5);
             }
         } else if (formData.destinationType === 'lounge') {
             // If user switched back to lounge from mobile and was on step 4 or 5,
@@ -63,18 +107,16 @@ export default function BookingForm() {
             case 1:
                 return !!formData.destinationType;
             case 2:
-                // Valid if mobile, or if lounge and location is selected
-                return formData.destinationType === 'mobile' || !!formData.loungeLocationId;
+                return !!formData.treatmentId;
             case 3:
-                // Valid if mobile, or if lounge and start time is selected
-                // Note: Assuming selectedStartTime is populated correctly after timeslot selection
-                return formData.destinationType === 'mobile' || !!formData.selectedStartTime;
+                return formData.destinationType === 'mobile' || !!formData.loungeLocationId;
             case 4:
+                return formData.destinationType === 'mobile' || !!formData.selectedStartTime;
+            case 5:
                 const basicInfoValid = !!formData.firstName &&
                     !!formData.lastName &&
                     !!formData.email &&
-                    !!formData.phone &&
-                    !!formData.therapyType;
+                    !!formData.phone;
                 const emailFormatValid = formData.email ? emailRegex.test(formData.email) : false;
 
                 // TODO: Add mobile address validation here when fields are defined
@@ -82,7 +124,7 @@ export default function BookingForm() {
                 //                          (!!formData.clientAddressStreet && !!formData.clientAddressCity /*...etc*/) : true;
 
                 return basicInfoValid && emailFormatValid; // && mobileAddressValid;
-            case 5: // Confirmation step, always considered valid to proceed from (to submit)
+            case 6:
                 return true;
             default:
                 return false;
@@ -100,9 +142,9 @@ export default function BookingForm() {
 
         let nextStepToGo = currentStep + 1;
 
-        // Skip steps 2 and 3 if mobile is selected when moving from step 1
-        if (currentStep === 1 && formData.destinationType === 'mobile') {
-            nextStepToGo = 4;
+        // --- ADJUSTED: Skip steps 3 (Lounge) and 4 (Timeslot) if mobile is selected when moving from step 2 (Treatment) ---
+        if (currentStep === 2 && formData.destinationType === 'mobile') {
+            nextStepToGo = 5; // Go directly to Attendee Info
         }
 
         // Proceed if step is valid (checked above) and within bounds
@@ -114,9 +156,9 @@ export default function BookingForm() {
     const prevStep = () => {
         let prevStepToGo = currentStep - 1;
 
-        // If going back from step 4 and destination is mobile, go back to step 1
-        if (currentStep === 4 && formData.destinationType === 'mobile') {
-            prevStepToGo = 1;
+        // --- ADJUSTED: If going back from step 5 (Attendee Info) and destination is mobile, go back to step 2 (Treatment) ---
+        if (currentStep === 5 && formData.destinationType === 'mobile') {
+            prevStepToGo = 2;
         }
 
         if (prevStepToGo >= 1) {
@@ -129,6 +171,14 @@ export default function BookingForm() {
             case 1:
                 return <StepDestination formData={formData} updateFormData={updateFormData} />;
             case 2:
+                return <StepTreatmentSelect
+                            formData={formData}
+                            updateFormData={updateFormData}
+                            treatmentsList={treatmentsList}
+                            isLoadingTreatments={isLoadingTreatments}
+                            treatmentError={treatmentError}
+                       />;
+            case 3:
                 // Only show lounge select if destination is lounge
                 if (formData.destinationType === 'lounge') {
                     return <StepLoungeSelect formData={formData} updateFormData={updateFormData} />;
@@ -137,15 +187,15 @@ export default function BookingForm() {
                     // Render nothing or a message, or redirect (handled by useEffect)
                     return <div>Redirecting...</div>; // Should be brief
                 }
-            case 3:
+            case 4:
                 if (formData.destinationType === 'lounge') {
                     return <StepTimeslotSelect formData={formData} updateFormData={updateFormData} />;
                 } else {
                     return <div>Redirecting...</div>; // Should be brief
                 }
-            case 4:
-                return <StepAttendeeInfo formData={formData} updateFormData={updateFormData} />;
             case 5:
+                return <StepAttendeeInfo formData={formData} updateFormData={updateFormData} />;
+            case 6:
                 return <StepConfirmation formData={formData} />;
             default:
                 return <div>Invalid Step</div>;
@@ -155,7 +205,8 @@ export default function BookingForm() {
     // Determine button visibility/state based on complex logic
     const isFirstStep = currentStep === 1;
     const isLastStep = currentStep === TOTAL_STEPS;
-    const isMobilePathLastRelevantStep = currentStep === 4 && formData.destinationType === 'mobile';
+    // --- ADJUSTED: Mobile path last relevant step is now 5 (Attendee Info) before Confirmation (Step 6) ---
+    const isMobilePathLastRelevantStepBeforeConfirm = currentStep === 5 && formData.destinationType === 'mobile';
 
     // Handle final submission
     const handleSubmit = async () => {
@@ -167,14 +218,14 @@ export default function BookingForm() {
 
         // Basic validation before submit (though step validation should cover most)
         // Re-validate crucial fields just in case
-        const { loungeLocationId, selectedStartTime, attendeeCount, firstName, lastName, email, phone, therapyType, destinationType } = formData;
+        const { loungeLocationId, selectedStartTime, attendeeCount, firstName, lastName, email, phone, treatmentId, treatmentPrice, treatmentDuration, destinationType } = formData;
         if (destinationType === 'lounge' && (!loungeLocationId || !selectedStartTime || !attendeeCount)) {
             setSubmissionError("Missing required booking details (location, time, attendees).");
             setIsSubmitting(false);
             return;
         }
-        if (!firstName || !lastName || !email || !phone || !therapyType) {
-            setSubmissionError("Missing required contact information or therapy selection.");
+        if (!firstName || !lastName || !email || !phone || !treatmentId) {
+            setSubmissionError("Missing required contact or treatment information.");
             setIsSubmitting(false);
             return;
         }
@@ -188,12 +239,45 @@ export default function BookingForm() {
         }
 
         try {
+            // --- Prepare data for submission, ensuring correct types/formats ---
+            // Ensure selectedStartTime is a valid ISO string required by Zod
+            let formattedStartTime: string | undefined = undefined;
+            if (formData.destinationType === 'lounge') {
+                if (!formData.selectedStartTime) {
+                    throw new Error("Selected start time is missing.");
+                }
+                try {
+                    // Parse the potentially existing ISO string and re-format it
+                    formattedStartTime = new Date(formData.selectedStartTime).toISOString();
+                } catch (dateError) {
+                    console.error("Error parsing selectedStartTime:", formData.selectedStartTime, dateError);
+                    throw new Error("Invalid date format for selected start time.");
+                }
+            }
+
+            const submissionData = {
+                ...formData,
+                // Use the reformatted time string
+                selectedStartTime: formattedStartTime,
+            };
+
+            // Remove if selectedStartTime is undefined (e.g., for mobile booking if it existed in formData)
+            if (submissionData.selectedStartTime === undefined) {
+                delete submissionData.selectedStartTime;
+            }
+
+            // // Validate that selectedStartTime is indeed present for lounge bookings (handled above)
+            // if (submissionData.destinationType === 'lounge' && !submissionData.selectedStartTime) {
+            //     throw new Error("Selected start time is missing.");
+            // }
+
             const response = await fetch('/api/bookings', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify(formData), // Send the complete form data
+                // --- UPDATED: Send the prepared submissionData ---
+                body: JSON.stringify(submissionData),
             });
 
             const result = await response.json();
@@ -256,8 +340,8 @@ export default function BookingForm() {
                             Previous
                         </Button>
 
-                        {/* Show Next button if not the last step (and not mobile on step 4) */}
-                        {(!isLastStep && !isMobilePathLastRelevantStep) && (
+                        {/* --- ADJUSTED: Show Next button if not the last step (and not mobile on step 5) --- */}
+                        {(!isLastStep && !isMobilePathLastRelevantStepBeforeConfirm) && (
                             <Button
                                 onClick={nextStep}
                                 disabled={isSubmitting || !isCurrentStepValid()} // Add validation check
@@ -266,11 +350,11 @@ export default function BookingForm() {
                             </Button>
                         )}
 
-                        {/* Show Submit button on the actual last step OR on step 4 if mobile */}
-                        {(isLastStep || isMobilePathLastRelevantStep) && (
+                        {/* --- ADJUSTED: Show Submit button on the actual last step OR on step 5 if mobile --- */}
+                        {(isLastStep || isMobilePathLastRelevantStepBeforeConfirm) && (
                             <Button
                                 onClick={handleSubmit}
-                                // Also disable submit if step 4 (info) or 5 (confirmation) is invalid, though step 5 is always true
+                                // Also disable submit if step 5 (info) or 6 (confirmation) is invalid, though step 6 is always true
                                 disabled={isSubmitting || !isCurrentStepValid()}
                             >
                                 {isSubmitting ? 'Submitting...' : 'Submit Booking'}

@@ -5,7 +5,7 @@ import { format, parseISO, isValid } from 'date-fns';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { BookingFormData } from './booking-form';
-import { LOUNGE_LOCATIONS, IV_THERAPIES } from '@/lib/constants';
+import { LOUNGE_LOCATIONS } from '@/lib/constants';
 
 interface StepConfirmationProps {
     formData: BookingFormData;
@@ -28,7 +28,9 @@ export default function StepConfirmation({ formData }: StepConfirmationProps) {
         lastName,
         email,
         phone,
-        therapyType
+        treatmentName,
+        treatmentPrice,
+        treatmentDuration
     } = formData;
 
     // Helper to format time, duplicated from StepTimeslotSelect for now
@@ -46,12 +48,11 @@ export default function StepConfirmation({ formData }: StepConfirmationProps) {
 
     const selectedTimeDisplay = formatTime(selectedStartTime);
     const selectedLocationName = findNameById(loungeLocationId, LOUNGE_LOCATIONS);
-    const selectedTherapyName = findNameById(therapyType, IV_THERAPIES);
     const formattedDate = selectedDate ? format(selectedDate, 'PPP') : 'N/A'; // e.g., Apr 14th, 2025
 
     return (
         <div className="space-y-6">
-            <h2 className="text-xl font-semibold">Step 5: Confirm Your Booking Details</h2>
+            <h2 className="text-xl font-semibold">Step 6: Confirm Your Booking Details</h2>
 
             <Card>
                 <CardHeader>
@@ -94,8 +95,14 @@ export default function StepConfirmation({ formData }: StepConfirmationProps) {
                         <Label>Phone:</Label>
                         <span>{phone || 'N/A'}</span>
 
-                        <Label>Therapy:</Label>
-                        <span>{selectedTherapyName}</span>
+                        <Label>Treatment:</Label>
+                        <span>{treatmentName || 'N/A'}</span>
+
+                        <Label>Price:</Label>
+                        <span>{treatmentPrice !== undefined ? `R ${treatmentPrice.toFixed(2)}` : 'N/A'}</span>
+
+                        <Label>Duration:</Label>
+                        <span>{treatmentDuration !== undefined ? `${treatmentDuration} minutes` : 'N/A'}</span>
                     </div>
 
                     <p className="text-xs text-gray-600 pt-4">Please review your details carefully. Clicking "Submit Booking" will finalize your request.</p>

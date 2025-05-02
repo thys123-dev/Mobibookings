@@ -3,15 +3,7 @@
 import React, { useState } from 'react';
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-} from "@/components/ui/select";
 import { BookingFormData } from './booking-form';
-import { IV_THERAPIES } from '@/lib/constants';
 
 interface StepAttendeeInfoProps {
     formData: BookingFormData;
@@ -38,13 +30,9 @@ export default function StepAttendeeInfo({ formData, updateFormData }: StepAtten
         }
     };
 
-    const handleTherapyChange = (value: string) => {
-        updateFormData({ therapyType: value });
-    };
-
     return (
         <div className="space-y-6">
-            <h2 className="text-xl font-semibold">Step 4: Your Information</h2>
+            <h2 className="text-xl font-semibold">Step 5: Your Information</h2>
 
             {/* Input fields */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -96,27 +84,6 @@ export default function StepAttendeeInfo({ formData, updateFormData }: StepAtten
                         className="mt-1"
                     />
                 </div>
-            </div>
-
-            {/* Therapy Selection */}
-            <div>
-                <Label htmlFor="therapy-select">Choose Your IV Therapy</Label>
-                <Select
-                    value={formData.therapyType}
-                    onValueChange={handleTherapyChange}
-                    required
-                >
-                    <SelectTrigger id="therapy-select" className="w-full mt-1 border-gray-400">
-                        <SelectValue placeholder="Select therapy..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                        {IV_THERAPIES.map((therapy) => (
-                            <SelectItem key={therapy.id} value={therapy.id}>
-                                {therapy.name}
-                            </SelectItem>
-                        ))}
-                    </SelectContent>
-                </Select>
             </div>
 
             {/* Note: Multi-attendee input is out of scope for now */}
