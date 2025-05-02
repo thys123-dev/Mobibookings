@@ -9,7 +9,7 @@ import { createCalendarEvent } from '@/lib/google-calendar'; // Import GCal help
 const bookingSchema = z.object({
     loungeLocationId: z.string().min(1, { message: "Location ID is required" }),
     selectedStartTime: z.string().datetime({ message: "Valid ISO 8601 start time string is required" }), // Use z.datetime()
-    attendeeCount: z.number().int().min(1).max(2, { message: "Attendees must be 1 or 2" }),
+    attendeeCount: z.number().int().min(1),
     firstName: z.string().min(1, { message: "First name is required" }),
     lastName: z.string().min(1, { message: "Last name is required" }),
     email: z.string().email({ message: "Valid email is required" }),
@@ -41,69 +41,39 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: 'Invalid booking type' }, { status: 400 });
         }
 
-        // ---- Database Booking using Direct Commands ----
-        // IMPORTANT: Supabase JS client doesn't directly support row locking ('FOR UPDATE').
-        // For true concurrency safety, a Supabase Edge Function or a database function (RPC)
-        // that performs the check and update atomically is the robust solution.
-        // Here, we simulate the logic with checks, but it has a small race condition window.
+        // ---- Database Booking using RPC Function ----
+        const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc(
+            'book_appointment_multi_slot',
+            {
+                p_location_id: bookingData.loungeLocationId,
+                p_start_time: bookingData.selectedStartTime,
+                p_attendee_count: bookingData.attendeeCount,
+                p_treatment_id: bookingData.treatmentId,
+                p_user_name: `${bookingData.firstName} ${bookingData.lastName}`,
+                p_user_email: bookingData.email,
+                p_user_phone: bookingData.phone,
+            }
+        );
 
-        // 1. Fetch the time slot
-        const { data: timeSlot, error: slotFetchError } = await supabaseAdmin
-            .from('time_slots')
-            .select('id, capacity, booked_count, end_time') // Select necessary fields including end_time for GCal
-            .eq('location_id', bookingData.loungeLocationId)
-            .eq('start_time', bookingData.selectedStartTime)
-            .single();
-
-        if (slotFetchError || !timeSlot) {
-            console.error('Supabase Error fetching slot:', slotFetchError);
-            return NextResponse.json({ error: 'Sorry, the selected time slot could not be found.' }, { status: 404 });
+        if (rpcError) {
+            console.error('Supabase RPC Error (book_appointment_multi_slot):', rpcError);
+            // Handle specific errors raised by the function
+            if (rpcError.message.includes('Insufficient consecutive slots')) {
+                return NextResponse.json({ error: 'Sorry, not enough consecutive time slots are available for your group size starting at this time.' }, { status: 409 });
+            }
+            if (rpcError.message.includes('Insufficient combined capacity')) {
+                return NextResponse.json({ error: 'Sorry, the selected time slots do not have enough combined capacity for your group size.' }, { status: 409 });
+            }
+            // Generic database error
+            return NextResponse.json({ error: 'Database error during booking process.', details: rpcError.message }, { status: 500 });
         }
 
-        // 2. Check capacity (Race condition possible here)
-        if (timeSlot.booked_count + bookingData.attendeeCount > timeSlot.capacity) {
-            return NextResponse.json({ error: 'Sorry, the selected time slot is now full.' }, { status: 409 }); // 409 Conflict
+        // If RPC succeeded, the returned data is the new booking ID
+        if (typeof rpcResult !== 'number') {
+             console.error('Supabase RPC Error: Expected booking ID (number) as result, received:', rpcResult);
+             return NextResponse.json({ error: 'Database error: Invalid booking confirmation received.' }, { status: 500 });
         }
-
-        // 3. Insert the booking
-        const { data: newBooking, error: bookingInsertError } = await supabaseAdmin
-            .from('bookings')
-            .insert({
-                time_slot_id: timeSlot.id,
-                user_name: `${bookingData.firstName} ${bookingData.lastName}`,
-                user_email: bookingData.email,
-                user_phone: bookingData.phone,
-                treatment_id: bookingData.treatmentId, // Use the new treatmentId
-                attendee_count: bookingData.attendeeCount,
-                // Omit google_event_id and zoho_entity_id initially
-            })
-            .select('id') // Select the ID of the newly created booking
-            .single();
-
-        if (bookingInsertError || !newBooking) {
-            console.error('Supabase Error inserting booking:', bookingInsertError);
-            return NextResponse.json({ error: 'Database error during booking creation.', details: bookingInsertError?.message }, { status: 500 });
-        }
-        newBookingId = newBooking.id; // Store the ID
-
-        // 4. Update the booked_count (Race condition also possible here)
-        const newBookedCount = timeSlot.booked_count + bookingData.attendeeCount;
-        const { error: slotUpdateError } = await supabaseAdmin
-            .from('time_slots')
-            .update({ booked_count: newBookedCount })
-            .eq('id', timeSlot.id);
-            // Optional: Add a condition to ensure the booked_count hasn't changed unexpectedly
-            // .eq('booked_count', timeSlot.booked_count);
-
-        if (slotUpdateError) {
-            console.error('Supabase Error updating slot count:', slotUpdateError);
-            // Attempt to roll back booking insertion? Difficult without transactions.
-            // Log this inconsistency, but the booking might already be confirmed.
-            // Consider returning success but logging the error for investigation.
-            // For now, let's proceed but log it.
-            console.error(`CRITICAL: Failed to update booked_count for slot ${timeSlot.id} after inserting booking ${newBookingId}. Manual check required.`);
-            // return NextResponse.json({ error: 'Database error updating slot capacity.', details: slotUpdateError.message }, { status: 500 });
-        }
+        newBookingId = rpcResult;
 
         // ---- Google Calendar Event Creation ----
         let googleEventId: string | null = null;
@@ -121,21 +91,36 @@ export async function POST(request: NextRequest) {
                 .select('name')
                 .eq('id', bookingData.treatmentId)
                 .single();
+                
+            // --- Calculate End Time for GCal ---
+            // Fetch the start times and end times of the booked slots based on the booking
+            // This assumes the RPC function correctly updated the booked_counts
+            const slotsNeeded = Math.ceil(bookingData.attendeeCount / 2.0);
+            const { data: bookedSlotsData, error: bookedSlotsError } = await supabaseAdmin
+                .from('time_slots')
+                .select('start_time, end_time')
+                .eq('location_id', bookingData.loungeLocationId)
+                .gte('start_time', bookingData.selectedStartTime)
+                .order('start_time', { ascending: true })
+                .limit(slotsNeeded);
 
+            if (bookedSlotsError || !bookedSlotsData || bookedSlotsData.length < slotsNeeded) {
+                 throw new Error(`Failed to fetch details of booked slots for booking ${newBookingId}: ${bookedSlotsError?.message}`);
+            }
+            const endTime = bookedSlotsData[bookedSlotsData.length - 1].end_time; // Get end time of the last slot in the block
+
+            // --- GCal Event Details ---
             if (locationError || !locationData || !locationData.google_calendar_id) {
                 throw new Error(`Failed to fetch location details or Google Calendar ID for ${bookingData.loungeLocationId}: ${locationError?.message}`);
             }
-            // Use end_time fetched earlier with the slot data
-            const endTime = timeSlot.end_time;
             if (!endTime) {
-                 throw new Error(`Missing end_time for slot ${timeSlot.id}`);
+                 throw new Error(`Missing end_time for the last booked slot`);
             }
             if (treatmentError || !treatmentData) {
                 throw new Error(`Failed to fetch treatment name for ID ${bookingData.treatmentId}: ${treatmentError?.message}`);
             }
 
-            // const therapyName = IV_THERAPIES.find(t => t.id === bookingData.therapyType)?.name || bookingData.therapyType; // OLD
-            const therapyName = treatmentData.name; // NEW
+            const therapyName = treatmentData.name;
             const eventSummary = `IV Booking - ${bookingData.firstName} ${bookingData.lastName}`;
             const eventDescription =
                 `Booking Details:\n` +

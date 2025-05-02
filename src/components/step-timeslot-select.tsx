@@ -61,7 +61,7 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
         const dateString = format(date, 'yyyy-MM-dd');
 
         try {
-            const response = await fetch(`/api/availability?locationId=${locationId}&date=${dateString}`);
+            const response = await fetch(`/api/availability?locationId=${locationId}&date=${dateString}&attendeeCount=${attendees}`);
             if (!response.ok) {
                 const errorData = await response.json();
                 throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
@@ -167,12 +167,11 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
                     {isLoading && <p>Loading slots...</p>}
                     {error && <p className="text-red-500">Error: {error}</p>}
                     {!isLoading && !error && availableSlots.length === 0 && (
-                        <p className="text-gray-600">No available slots found for this date.</p>
+                        <p className="text-gray-600">No available slots found for {attendees} attendee{attendees !== 1 ? 's' : ''} on this date.</p>
                     )}
                     {!isLoading && !error && availableSlots.length > 0 && (
                         <div className="grid grid-cols-3 gap-3">
                             {availableSlots
-                                .filter(slot => slot.remaining_seats >= attendees) // Filter based on required seats
                                 .map((slot) => (
                                     <Button
                                         key={slot.id}
@@ -185,10 +184,6 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
                                     </Button>
                                 ))
                             }
-                            {/* Show message if filtering removed all slots */}
-                            {availableSlots.length > 0 && availableSlots.filter(slot => slot.remaining_seats >= attendees).length === 0 && (
-                                <p className="col-span-3 text-gray-600">No slots available with {attendees} seat{attendees !== 1 ? 's' : ''}.</p>
-                            )}
                         </div>
                     )}
                 </div>

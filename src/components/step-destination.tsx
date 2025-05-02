@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Input } from "@/components/ui/input"; // Keep for potential future use, but not for attendee count now
+import { Input } from "@/components/ui/input"; // Use Input now
 import { Label } from "@/components/ui/label";
 import {
     Select,
@@ -25,24 +25,26 @@ export default function StepDestination({ formData, updateFormData }: StepDestin
         const destType = value as 'lounge' | 'mobile';
         const updates: Partial<BookingFormData> = { destinationType: destType };
 
-        // Reset attendee count if switching to mobile, or ensure it's max 1 if mobile
+        // Reset attendee count to 1 ONLY if switching to mobile
         if (destType === 'mobile') {
             updates.attendeeCount = 1; // Mobile service is per person
-        } else {
-            // If switching back to lounge, ensure attendee count isn't invalid (>2)
-            // or reset if it wasn't set
-            if (!formData.attendeeCount || formData.attendeeCount > 2) {
-                updates.attendeeCount = 1; // Default to 1 when selecting lounge
-            }
         }
+        // REMOVED: Logic that previously limited count when switching back to lounge
+
         updateFormData(updates);
     };
 
-    const handleAttendeeChange = (value: string) => {
-        const count = parseInt(value, 10);
-        if (!isNaN(count)) {
+    // UPDATED: Handler for number Input
+    const handleAttendeeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+        const count = parseInt(event.target.value, 10);
+        // Update only if it's a valid positive number
+        if (!isNaN(count) && count > 0) {
             updateFormData({ attendeeCount: count });
+        } else if (event.target.value === '') {
+            // Allow clearing the input (formData value becomes undefined)
+            updateFormData({ attendeeCount: undefined });
         }
+        // If input is invalid (e.g., negative, text), do nothing - input field constraints handle display
     };
 
     return (
@@ -67,33 +69,25 @@ export default function StepDestination({ formData, updateFormData }: StepDestin
                 </Select>
             </div>
 
-            {/* Attendee Count (Dropdown) */}
+            {/* UPDATED: Attendee Count (Number Input) */}
             <div>
                 <Label htmlFor="attendee-count">Number of People Attending</Label>
-                <Select
-                    value={formData.attendeeCount ? String(formData.attendeeCount) : undefined}
-                    onValueChange={handleAttendeeChange}
+                <Input
+                    id="attendee-count"
+                    name="attendeeCount" // Ensure name matches formData key
+                    type="number"
+                    min="1"
+                    value={formData.attendeeCount || ''} // Use empty string if undefined
+                    onChange={handleAttendeeChange}
                     required
                     // Disable if no destination selected OR if mobile is selected
                     disabled={!formData.destinationType || formData.destinationType === 'mobile'}
-                >
-                    <SelectTrigger id="attendee-count" className="w-full mt-1 border-gray-400">
-                        <SelectValue placeholder="Select number..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                        {formData.destinationType === 'lounge' ? (
-                            <>
-                                <SelectItem value="1">1 Person</SelectItem>
-                                <SelectItem value="2">2 People</SelectItem>
-                            </>
-                        ) : (
-                            // Only show 1 if mobile or no destination selected (but disabled)
-                            <SelectItem value="1">1 Person</SelectItem>
-                        )}
-                    </SelectContent>
-                </Select>
+                    className="w-full mt-1 border-gray-400"
+                    placeholder="Enter number..."
+                />
+                {/* UPDATED: Help text */}
                 {formData.destinationType === 'lounge' && (
-                    <p className="text-xs text-gray-500 mt-1">Max 2 attendees per booking at our lounges.</p>
+                    <p className="text-xs text-gray-500 mt-1">Enter the total number of people. Groups larger than 2 may require booking consecutive time slots.</p>
                 )}
                 {formData.destinationType === 'mobile' && (
                     <p className="text-xs text-gray-500 mt-1">Mobile service bookings are currently for single attendees.</p>
