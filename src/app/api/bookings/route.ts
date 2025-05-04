@@ -14,6 +14,8 @@ const attendeeSchema = z.object({
     email: z.string().email({ message: "Valid email is required for each attendee" }),
     phone: z.string().min(1, { message: "Phone number is required for each attendee" }),
     fluidOption: z.enum(['200ml', '1000ml', '1000ml_dextrose'], { required_error: "Fluid option selection is required for each attendee" }),
+    // --- NEW: Add optional add-on treatment ID ---
+    addOnTreatmentId: z.union([z.number(), z.string()]).nullable().optional(),
 });
 
 // Zod schema for strict validation of incoming data
@@ -45,7 +47,7 @@ type BookingData = z.infer<typeof bookingSchema>;
 interface TreatmentDbInfo {
     id: number | string;
     name: string;
-    duration_minutes_1000ml: number; // Using 1000ml as per plan
+    // No duration needed here, just name for GCal mapping
 }
 
 export async function POST(request: NextRequest) {
@@ -94,15 +96,26 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: 'Database error during booking process.', details: rpcError.message }, { status: 500 });
         }
 
-        // If RPC succeeded, the returned data is the new booking ID AND the required span
-        // -- MODIFIED: Expect object and extract values --
-        if (!rpcResult || typeof rpcResult.booking_id !== 'number' || rpcResult.booking_id <= 0 || typeof rpcResult.required_span !== 'number' || rpcResult.required_span <= 0) {
-             console.error('Supabase RPC Error: Expected {booking_id: number, required_span: number} as result, received:', rpcResult);
-             // Even if RPC didn't error, if we don't get a valid ID/span, we can't proceed.
-             return NextResponse.json({ error: 'Database error: Invalid booking confirmation data received.' }, { status: 500 });
+        // --- ADJUSTED: Handle array result from RPC --- 
+        // RPC functions returning TABLE return an array of rows.
+        if (!rpcResult || !Array.isArray(rpcResult) || rpcResult.length === 0) {
+            console.error('Supabase RPC Error: Expected non-empty array as result, received:', rpcResult);
+            return NextResponse.json({ error: 'Database error: Invalid booking confirmation data received (empty/invalid array).' }, { status: 500 });
         }
-        newBookingId = rpcResult.booking_id;
-        const actualSlotSpan = rpcResult.required_span; // Store the actual span
+
+        // Extract the first row from the result array
+        const bookingConfirmation = rpcResult[0];
+
+        // Check the structure of the first row object
+        if (typeof bookingConfirmation.booking_id !== 'number' || bookingConfirmation.booking_id <= 0 || 
+            typeof bookingConfirmation.required_span !== 'number' || bookingConfirmation.required_span <= 0) {
+             console.error('Supabase RPC Error: Expected {booking_id: number, required_span: number} in result array element, received:', bookingConfirmation);
+             return NextResponse.json({ error: 'Database error: Invalid booking confirmation data structure received.' }, { status: 500 });
+        }
+
+        // Assign values from the extracted object
+        newBookingId = bookingConfirmation.booking_id;
+        const actualSlotSpan = bookingConfirmation.required_span;
         console.log(`RPC successful, received booking ID: ${newBookingId}, Required Span: ${actualSlotSpan}`); // Log successful RPC ID and span
 
         // ---- NEW: Update Booking with Attendee Details and Contact Info ----
@@ -164,49 +177,41 @@ export async function POST(request: NextRequest) {
 
             // Fetch treatment names AND durations for ALL attendees
             const uniqueTreatmentIds = Array.from(new Set(bookingData.attendees.map(a => a.treatmentId)));
+            // --- NEW: Collect unique add-on IDs as well ---
+            const uniqueAddOnTreatmentIds = Array.from(new Set(
+                bookingData.attendees
+                    .map(a => a.addOnTreatmentId)
+                    // Filter out null/undefined/empty string values before creating the Set
+                    .filter(id => id !== null && id !== undefined && String(id).length > 0)
+            ));
+            // Combine both sets of IDs for a single query
+            const allUniqueIds = Array.from(new Set([...uniqueTreatmentIds, ...uniqueAddOnTreatmentIds]));
+
             const { data: treatmentsData, error: treatmentsError } = await supabaseAdmin
                 .from('treatments')
-                .select('id, name, duration_minutes_1000ml') // Select name and duration
-                .in('id', uniqueTreatmentIds);
+                .select('id, name') // Only need id and name for GCal description mapping
+                .in('id', allUniqueIds); // Fetch details for both base and add-on treatments
 
             if (treatmentsError || !treatmentsData) {
                  throw new Error(`Failed to fetch treatment details: ${treatmentsError?.message}`);
             }
 
-            // Create a map for easy lookup
-            const treatmentInfoMap = new Map<string | number, TreatmentDbInfo>();
-            treatmentsData.forEach(t => treatmentInfoMap.set(t.id, t));
+            // Create a map for easy lookup (handles both base and add-on names)
+            const treatmentInfoMap = new Map<string | number, { name: string }>();
+            treatmentsData.forEach(t => treatmentInfoMap.set(t.id, { name: t.name }));
 
             // --- Fetch treatment durations (both 200ml and 1000ml) ---
+            // --- NOTE: Duration fetch only needs BASE treatment IDs ---
              const { data: treatmentsDurationData, error: treatmentsDurationError } = await supabaseAdmin
                 .from('treatments')
                 .select('id, name, duration_minutes_200ml, duration_minutes_1000ml') // Select both durations
-                .in('id', uniqueTreatmentIds);
+                .in('id', uniqueTreatmentIds); // <<< Use only uniqueTreatmentIds (base treatments)
 
             if (treatmentsDurationError || !treatmentsDurationData) {
                  throw new Error(`Failed to fetch treatment durations: ${treatmentsDurationError?.message}`);
             }
             const treatmentDurationMap = new Map<string | number, { name: string, duration_200: number, duration_1000: number}>();
             treatmentsDurationData.forEach(t => treatmentDurationMap.set(t.id, { name: t.name, duration_200: t.duration_minutes_200ml, duration_1000: t.duration_minutes_1000ml }));
-
-            // --- CORRECTED: Calculate finalSlotsNeeded for GCal End Time --- 
-            // --- REMOVED: GCal specific calculation - use actualSlotSpan now ---
-            // let max_duration_gcal = 0;
-            // for (const attendee of bookingData.attendees) {
-            //      const lookupIdGcal = typeof attendee.treatmentId === 'string' ? parseInt(attendee.treatmentId, 10) : attendee.treatmentId;
-            //      const durationInfoGcal = treatmentDurationMap.get(lookupIdGcal);
-            //      if (durationInfoGcal) {
-            //         const currentDurationGcal = attendee.fluidOption === '200ml' 
-            //             ? durationInfoGcal.duration_200 
-            //             : durationInfoGcal.duration_1000;
-            //         max_duration_gcal = Math.max(max_duration_gcal, currentDurationGcal);
-            //      } 
-            //      // No need to error here as treatment presence is validated earlier
-            // }
-            // const durationSlotsNeededGcal = (max_duration_gcal > 30) ? 2 : 1;
-            // const capacitySlotsNeededGcal = Math.ceil(bookingData.attendeeCount / 2.0);
-            // const finalSlotsNeededGcal = Math.max(durationSlotsNeededGcal, capacitySlotsNeededGcal);
-            // --- END Removal --- 
 
             // Fetch the start times and end times of the booked slots using the CORRECT number of slots
             // const slotsNeeded = Math.ceil(bookingData.attendeeCount / 2.0); // OLD calculation
@@ -270,9 +275,11 @@ export async function POST(request: NextRequest) {
                 const treatmentDetails = treatmentDurationMap.get(lookupId);
                 const treatmentName = treatmentDetails ? treatmentDetails.name : `Unknown Treatment (ID: ${attendee.treatmentId})`;
                 
-                // Determine correct duration based on fluidOption
+                // Determine correct duration based on fluidOption AND add-on
                 let duration = 'N/A';
-                if (treatmentDetails && attendee.fluidOption) {
+                if (attendee.addOnTreatmentId) {
+                    duration = '90 minutes'; // Fixed duration for add-on
+                } else if (treatmentDetails && attendee.fluidOption) {
                    duration = attendee.fluidOption === '200ml' 
                                 ? `${treatmentDetails.duration_200} minutes` 
                                 : `${treatmentDetails.duration_1000} minutes`;
@@ -291,6 +298,13 @@ export async function POST(request: NextRequest) {
 ` +
                                   `     Duration: ${duration}
 `;
+                // --- NEW: Add Add-on treatment if present ---
+                if (attendee.addOnTreatmentId) {
+                    const addOnLookupId = typeof attendee.addOnTreatmentId === 'string' ? parseInt(attendee.addOnTreatmentId, 10) : attendee.addOnTreatmentId;
+                    const addOnDetails = treatmentInfoMap.get(addOnLookupId);
+                    const addOnName = addOnDetails ? addOnDetails.name : `Unknown Add-on (ID: ${attendee.addOnTreatmentId})`;
+                    eventDescription += `     Add-on: ${addOnName}\n`; // Added newline for clarity
+                }
             });
 
             googleEventId = await createCalendarEvent({

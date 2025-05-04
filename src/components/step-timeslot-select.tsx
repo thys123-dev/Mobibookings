@@ -14,16 +14,18 @@ import {
     PopoverTrigger,
 } from "@/components/ui/popover"; // Import Popover components
 import { BookingFormData, AttendeeData } from './booking-form'; // Import AttendeeData
+import { useFormContext } from 'react-hook-form'; // Import
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
-// Define the structure of a time slot received from the API
+// ADD TimeSlot interface definition here
 interface TimeSlot {
-    id: string | number; // Match DB schema
-    start_time: string; // ISO 8601 string
-    end_time: string; // ISO 8601 string
-    // No longer necessarily includes remaining_seats from the backend
-    // capacity: number;
-    // booked_count: number;
-    // remaining_seats: number;
+    id: number;
+    location_id: string;
+    start_time: string; // ISO 8601 format
+    end_time: string;   // ISO 8601 format
+    is_available: boolean;
+    capacity: number;
+    current_bookings: number;
 }
 
 // --- NEW: Type for the data sent to availability API ---
@@ -34,109 +36,106 @@ interface AvailabilityRequestData {
 }
 
 interface StepTimeslotSelectProps {
-    formData: BookingFormData;
-    updateFormData: (data: Partial<BookingFormData>) => void;
+    // formData: BookingFormData;
+    // updateFormData: (data: Partial<BookingFormData>) => void;
 }
 
-export default function StepTimeslotSelect({ formData, updateFormData }: StepTimeslotSelectProps) {
-    const [selectedDate, setSelectedDate] = useState<Date | undefined>(formData.selectedDate);
+export default function StepTimeslotSelect(/* { formData, updateFormData }: StepTimeslotSelectProps */) {
+    const form = useFormContext<BookingFormData>(); // Use context
+
+    // Get necessary values from form context
+    const locationId = form.watch('loungeLocationId');
+    const selectedDate = form.watch('selectedDate');
+    const selectedTimeSlotId = form.watch('selectedTimeSlotId');
+    const attendeeCount = form.watch('attendeeCount'); // Get attendee count
+
     const [availableSlots, setAvailableSlots] = useState<TimeSlot[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [isPopoverOpen, setIsPopoverOpen] = useState(false); // Control popover state
 
-    const locationId = formData.loungeLocationId;
-    // const attendeesCount = formData.attendeeCount || 1; // No longer used directly for API call
-    const attendeesDetails = formData.attendees || []; // Use the attendee details array
+    const attendeesDetails = form.watch('attendees') || []; // Use the attendee details array
 
     useEffect(() => {
-        // Fetch availability when date, location, or relevant attendee details change
-        // Check if all attendees have treatmentId and fluidOption before fetching
-        const canFetch = selectedDate && locationId && attendeesDetails.length > 0 && 
-                       attendeesDetails.every(a => a.treatmentId && a.fluidOption);
-                       
+        // Ensure all necessary data including attendee details are present
+        const canFetch = selectedDate && locationId && attendeeCount && 
+                       attendeesDetails.length === attendeeCount && // Make sure array matches count
+                       attendeesDetails.every(a => a && (a.addOnTreatmentId || a.fluidOption)); // Require either add-on OR fluid option
+
         if (canFetch) {
-            fetchAvailability(selectedDate);
-        } else {
-            setAvailableSlots([]); // Clear slots if required data is missing
-            updateFormData({ selectedTimeSlotId: undefined, selectedStartTime: undefined });
-        }
-        // Trigger fetch if date, location, or attendee details change
-    }, [selectedDate, locationId, attendeesDetails]); // Add attendeesDetails dependency
+            setIsLoading(true);
+            setError(null);
+            const dateString = format(selectedDate, 'yyyy-MM-dd');
+            
+            // --- Revert to POST request --- 
+            const requestBody = {
+                locationId: locationId,
+                date: dateString,
+                attendeeCount: attendeeCount,
+                // Add the attendees array with necessary fields
+                attendees: attendeesDetails.map(a => ({
+                    treatmentId: a?.treatmentId, 
+                    fluidOption: a?.fluidOption, 
+                    addOnTreatmentId: a?.addOnTreatmentId 
+                }))
+            };
 
-    const fetchAvailability = async (date: Date) => {
-        setIsLoading(true);
-        setError(null);
-        setAvailableSlots([]); // Clear previous slots
-        updateFormData({ selectedTimeSlotId: undefined, selectedStartTime: undefined }); // Clear selection on new fetch
-
-        const dateString = format(date, 'yyyy-MM-dd');
-        
-        // Prepare data for POST request
-        const requestBody: AvailabilityRequestData = {
-            locationId: locationId!,
-            date: dateString,
-            attendees: attendeesDetails.map(a => ({
-                treatmentId: a.treatmentId!,
-                fluidOption: a.fluidOption!
-            }))
-        };
-
-        try {
-            // --- UPDATED: Use POST request --- 
-            const response = await fetch('/api/availability', {
+            fetch('/api/availability', { // Use POST
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
                 },
-                body: JSON.stringify(requestBody)
-            });
-
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
-            }
-            const slots: TimeSlot[] = await response.json();
-            setAvailableSlots(slots);
-        } catch (err: any) {
-            console.error("Failed to fetch availability:", err);
-            setError(err.message || "Could not fetch time slots. Please try again.");
-        } finally {
-            setIsLoading(false);
+                body: JSON.stringify(requestBody),
+            })
+                .then(res => {
+                    if (!res.ok) {
+                        return res.json().then(err => { throw new Error(err.error || 'Failed to fetch availability'); });
+                    }
+                    return res.json();
+                })
+                .then((data: TimeSlot[]) => {
+                    setAvailableSlots(data);
+                    setIsLoading(false);
+                })
+                .catch(err => {
+                    console.error("Availability fetch error:", err);
+                    setError(err.message || 'Could not load time slots.');
+                    setAvailableSlots([]); // Clear slots on error
+                    setIsLoading(false);
+                });
+        } else {
+            setAvailableSlots([]); // Clear slots if date/location/attendeeCount not set
         }
-    };
+    }, [selectedDate, locationId, attendeeCount, attendeesDetails]); // Add attendeesDetails dependency
 
     const handleDateSelect = (date: Date | undefined) => {
         if (date) {
-            // Prevent selecting dates in the past
-            if (startOfDay(date) < startOfDay(new Date())) {
-                setError("Cannot select past dates.");
-                setSelectedDate(undefined);
-                updateFormData({ selectedDate: undefined, selectedTimeSlotId: undefined });
-            } else {
-                setSelectedDate(date);
-                updateFormData({ selectedDate: date, selectedTimeSlotId: undefined }); // Update form data, clear slot
-                setError(null); // Clear any previous errors
-                setIsPopoverOpen(false); // Close popover on date selection
-            }
-        } else {
-            setSelectedDate(undefined);
-            updateFormData({ selectedDate: undefined, selectedTimeSlotId: undefined });
+            form.setValue('selectedDate', date, { shouldValidate: true });
+            // Reset selected time slot when date changes
+            form.setValue('selectedTimeSlotId', undefined, { shouldValidate: true });
+            form.setValue('selectedStartTime', undefined, { shouldValidate: true });
+            // updateFormData({ selectedDate: date, selectedTimeSlotId: undefined, selectedStartTime: undefined });
         }
     };
 
     const handleSlotSelect = (slotId: string | number) => {
+        console.log('*** handleSlotSelect called for slot:', slotId);
         // Find the full slot object from the availableSlots array
         const selectedSlot = availableSlots.find(slot => String(slot.id) === String(slotId));
         if (selectedSlot) {
-            updateFormData({
-                selectedTimeSlotId: String(selectedSlot.id),
-                selectedStartTime: selectedSlot.start_time // Store the start time string
-            });
+            form.setValue('selectedTimeSlotId', String(selectedSlot.id), { shouldValidate: true });
+            form.setValue('selectedStartTime', selectedSlot.start_time, { shouldValidate: true });
+            // Trigger validation specifically for selectedStartTime after setting it
+            form.trigger('selectedStartTime');
+            // updateFormData({
+            //     selectedTimeSlotId: String(selectedSlot.id),
+            //     selectedStartTime: selectedSlot.start_time // Store the start time string
+            // });
         } else {
             console.error("Selected slot not found in available slots list");
             // Optionally handle this error case, e.g., clear selection or show message
-            updateFormData({ selectedTimeSlotId: undefined, selectedStartTime: undefined });
+            form.setValue('selectedTimeSlotId', undefined, { shouldValidate: true });
+            form.setValue('selectedStartTime', undefined, { shouldValidate: true });
         }
     };
 
@@ -154,7 +153,7 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
     // --- Check if prerequisite data is available --- 
     const prerequisiteMissing = !locationId || attendeesDetails.length === 0 || attendeesDetails.some(a => !a.treatmentId || !a.fluidOption);
 
-    if (formData.destinationType !== 'lounge') {
+    if (form.watch('destinationType') !== 'lounge') {
         // This case should ideally not be reached due to form flow logic
         return null; 
     }
@@ -184,7 +183,7 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
                             mode="single"
                             selected={selectedDate}
                             onSelect={handleDateSelect}
-                            disabled={(date) => startOfDay(date) < startOfDay(new Date())}
+                            disabled={(date) => date < new Date(new Date().setHours(0, 0, 0, 0))}
                             initialFocus // Focus calendar when opened
                         />
                     </PopoverContent>
@@ -212,9 +211,9 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
                                 .map((slot) => (
                                     <Button
                                         key={slot.id}
-                                        variant={formData.selectedTimeSlotId === String(slot.id) ? "default" : "outline"}
+                                        variant={String(slot.id) === selectedTimeSlotId ? "default" : "outline"}
                                         onClick={() => handleSlotSelect(slot.id)}
-                                        // Removed explicit height/py classes for default button sizing
+                                        type="button"
                                     >
                                         {formatTime(slot.start_time)}
                                         {/* Removed seat count as it's no longer reliable/provided */}
@@ -229,7 +228,7 @@ export default function StepTimeslotSelect({ formData, updateFormData }: StepTim
 
             {/* Display message if no date/slot selected */}
             {!prerequisiteMissing && !selectedDate && <p className="text-sm text-gray-600">Please select a date.</p>}
-            {!prerequisiteMissing && selectedDate && !formData.selectedTimeSlotId && !isLoading && availableSlots.length > 0 && (
+            {!prerequisiteMissing && selectedDate && !selectedTimeSlotId && !isLoading && availableSlots.length > 0 && (
                 <p className="text-sm text-gray-600">Please select an available time slot.</p>
             )}
         </div>

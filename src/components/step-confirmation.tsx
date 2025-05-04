@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { format, parseISO, isValid } from 'date-fns';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -57,8 +57,8 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
     const selectedLocationName = findNameById(loungeLocationId, LOUNGE_LOCATIONS);
     const formattedDate = selectedDate ? format(selectedDate, 'PPP') : 'N/A'; // e.g., Apr 14th, 2025
 
-    // --- NEW: Helper to get treatment details --- 
-    const getTreatmentDetails = (treatmentId: number | string | undefined): Treatment | undefined => {
+    // --- Helper to get treatment details - Allow null ID ---
+    const getTreatmentDetails = (treatmentId: number | string | undefined | null): Treatment | undefined => {
         if (!treatmentId || !treatmentsList) return undefined;
         return treatmentsList.find(t => String(t.id) === String(treatmentId));
     }
@@ -73,17 +73,30 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
         
         return attendees.reduce((total, attendee) => {
             const treatment = getTreatmentDetails(attendee.treatmentId);
-            if (!treatment || !attendee.fluidOption) {
-                return total; // Don't add cost if treatment or fluid not selected
-            }
+            const addOnTreatment = getTreatmentDetails(attendee.addOnTreatmentId); // Get add-on details
+
+            let currentCost = 0; // Start cost at 0
             
-            let currentCost = treatment.price;
-            if (attendee.fluidOption === '1000ml_dextrose') {
-                currentCost += DEXTROSE_EXTRA_COST;
+            if (treatment) {
+                currentCost += treatment.price; // Add base price if treatment exists
+
+                if (addOnTreatment) {
+                    currentCost += addOnTreatment.price || 0; // Add add-on price if it also exists
+                } else if (attendee.fluidOption === '1000ml_dextrose') {
+                    // Add Dextrose cost only if NO add-on
+                     currentCost += DEXTROSE_EXTRA_COST;
+                }
             }
-            return total + currentCost;
+            // No need to check treatment again here, already handled above
+            return total + currentCost; 
         }, 0);
-    }, [attendees, treatmentsList]); // Recalculate if attendees or treatments change
+    }, [attendees, treatmentsList]); // Dependencies look correct
+
+    // Helper to find treatment details by ID
+    const getTreatmentById = (id: number | string | undefined | null): Treatment | undefined => {
+        if (!id) return undefined;
+        return treatmentsList.find(t => String(t.id) === String(id));
+    };
 
     return (
         <div className="space-y-6">
@@ -138,18 +151,30 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
                     ) : (
                         attendees.map((attendee, index) => {
                             const treatment = getTreatmentDetails(attendee.treatmentId);
+                            const addOnTreatment = getTreatmentById(attendee.addOnTreatmentId); // Define addOnTreatment HERE
                             
                             // Calculate display price and duration based on fluid option
-                            let displayPrice = treatment?.price;
-                            if (attendee.fluidOption === '1000ml_dextrose' && displayPrice !== undefined) {
-                                displayPrice += DEXTROSE_EXTRA_COST;
-                            }
+                            const displayPrice = useMemo(() => {
+                                if (!treatment || !attendee.fluidOption) {
+                                    return undefined;
+                                }
+                                
+                                let currentCost = treatment.price;
+                                if (attendee.fluidOption === '1000ml_dextrose') {
+                                    currentCost += DEXTROSE_EXTRA_COST;
+                                }
+                                return currentCost;
+                            }, [treatment, attendee.fluidOption]);
 
-                            let displayDuration = undefined;
-                            if (treatment && attendee.fluidOption) {
-                                displayDuration = attendee.fluidOption === '200ml' 
+                            // ADJUST Duration logic for confirmation page
+                            let displayDurationText = 'N/A';
+                            if (addOnTreatment) {
+                                displayDurationText = '90 minutes'; // Fixed duration if add-on selected
+                            } else if (treatment && attendee.fluidOption) {
+                                const durationMinutes = attendee.fluidOption === '200ml' 
                                     ? treatment.duration_minutes_200ml 
-                                    : treatment.duration_minutes_1000ml; // Use 1000ml for both 1000ml options
+                                    : treatment.duration_minutes_1000ml;
+                                displayDurationText = `${durationMinutes} minutes`;
                             }
                             
                             // Format fluid option text
@@ -173,8 +198,8 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
                                          <span>{displayPrice !== undefined ? `R ${displayPrice.toFixed(2)}` : 'N/A'}</span>
 
                                          <Label className="text-right">Duration:</Label>
-                                         {/* CORRECTED: Displaying calculated duration */}
-                                         <span>{displayDuration !== undefined ? `${displayDuration} minutes` : 'N/A'}</span>
+                                         {/* Use the adjusted duration text */}
+                                         <span>{displayDurationText}</span>
 
                                         {/* Display Email and Phone per attendee */}
                                         <Label className="text-right">Email:</Label>
@@ -182,6 +207,14 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
 
                                         <Label className="text-right">Phone:</Label>
                                         <span>{attendee.phone || 'N/A'}</span>
+
+                                        {/* Display Add-on Treatment - Styled like others, with price */} 
+                                        {addOnTreatment && (
+                                            <>
+                                                <Label className="text-right font-semibold">Add-on:</Label>
+                                                <span>{addOnTreatment.name} {addOnTreatment.price ? `(R ${addOnTreatment.price.toFixed(2)})` : ''}</span>
+                                            </>
+                                        )}
                                      </div>
                                 </div>
                             );
