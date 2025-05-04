@@ -65,6 +65,26 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
 
     const DEXTROSE_EXTRA_COST = 200; // Define cost here too for consistency
 
+    // --- NEW: Calculate total cost (same logic as Step 2) --- 
+    const totalCost = React.useMemo(() => { // Added React.useMemo
+        if (!attendees || attendees.length === 0) {
+            return 0;
+        }
+        
+        return attendees.reduce((total, attendee) => {
+            const treatment = getTreatmentDetails(attendee.treatmentId);
+            if (!treatment || !attendee.fluidOption) {
+                return total; // Don't add cost if treatment or fluid not selected
+            }
+            
+            let currentCost = treatment.price;
+            if (attendee.fluidOption === '1000ml_dextrose') {
+                currentCost += DEXTROSE_EXTRA_COST;
+            }
+            return total + currentCost;
+        }, 0);
+    }, [attendees, treatmentsList]); // Recalculate if attendees or treatments change
+
     return (
         <div className="space-y-6">
             <h2 className="text-xl font-semibold">Step 5: Confirm Your Booking Details</h2>
@@ -100,10 +120,10 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
                     {/* REMOVED: Primary Contact Details section */}
                     {/* <div className="grid grid-cols-2 gap-x-4 gap-y-2">
                          <Label>Contact Email:</Label>
-                         <span>{email || 'N/A'}</span>
+                        <span>{email || 'N/A'}</span>
 
                          <Label>Contact Phone:</Label>
-                         <span>{phone || 'N/A'}</span>
+                        <span>{phone || 'N/A'}</span>
                     </div> */}
                 </CardContent>
             </Card>
@@ -167,6 +187,11 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
                             );
                         })
                     )}
+                     {/* --- ADDED: Display Total Cost --- */}
+                     <div className="mt-4 pt-4 border-t">
+                         <p className="text-lg font-semibold text-right">Total Estimated Cost: R {totalCost.toFixed(2)}</p>
+                    </div>
+
                     <p className="text-xs text-gray-600 pt-4">Please review all details carefully. Clicking "Submit Booking" will finalize your request.</p>
                 </CardContent>
             </Card>

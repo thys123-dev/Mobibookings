@@ -74,15 +74,9 @@ export async function POST(request: NextRequest) {
         const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc(
             'book_appointment_multi_slot',
             {
-                p_location_id: bookingData.loungeLocationId,
-                p_start_time: bookingData.selectedStartTime,
+            p_location_id: bookingData.loungeLocationId,
+            p_start_time: bookingData.selectedStartTime,
                 p_attendee_count: bookingData.attendeeCount,
-                // Pass Attendee 1 details for unused legacy params
-                p_treatment_id: bookingData.attendees[0]?.treatmentId, // Unused by new RPC but kept for signature match
-                p_user_name: `${bookingData.attendees[0]?.firstName || ''} ${bookingData.attendees[0]?.lastName || ''}`,
-                p_user_email: bookingData.attendees[0]?.email, // Unused
-                p_user_phone: bookingData.attendees[0]?.phone, // Unused
-                // ADDED: Pass the full attendee details array
                 p_attendees_details: bookingData.attendees
             }
         );
@@ -100,12 +94,16 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: 'Database error during booking process.', details: rpcError.message }, { status: 500 });
         }
 
-        // If RPC succeeded, the returned data is the new booking ID
-        if (typeof rpcResult !== 'number') {
-             console.error('Supabase RPC Error: Expected booking ID (number) as result, received:', rpcResult);
-             return NextResponse.json({ error: 'Database error: Invalid booking confirmation received.' }, { status: 500 });
+        // If RPC succeeded, the returned data is the new booking ID AND the required span
+        // -- MODIFIED: Expect object and extract values --
+        if (!rpcResult || typeof rpcResult.booking_id !== 'number' || rpcResult.booking_id <= 0 || typeof rpcResult.required_span !== 'number' || rpcResult.required_span <= 0) {
+             console.error('Supabase RPC Error: Expected {booking_id: number, required_span: number} as result, received:', rpcResult);
+             // Even if RPC didn't error, if we don't get a valid ID/span, we can't proceed.
+             return NextResponse.json({ error: 'Database error: Invalid booking confirmation data received.' }, { status: 500 });
         }
-        newBookingId = rpcResult;
+        newBookingId = rpcResult.booking_id;
+        const actualSlotSpan = rpcResult.required_span; // Store the actual span
+        console.log(`RPC successful, received booking ID: ${newBookingId}, Required Span: ${actualSlotSpan}`); // Log successful RPC ID and span
 
         // ---- NEW: Update Booking with Attendee Details and Contact Info ----
         try {
@@ -122,24 +120,36 @@ export async function POST(request: NextRequest) {
                  return NextResponse.json({ error: 'Primary attendee email and phone are missing.'}, { status: 400 });
             }
 
-            const { error: updateError } = await supabaseAdmin
+            // --- ADDED Logging before update ---
+            console.log(`Attempting to update booking ID: ${newBookingId} with attendee details and primary contact.`);
+            const { data: updateData, error: updateError } = await supabaseAdmin // Capture data too
                 .from('bookings')
                 .update({
                     attendees_details: bookingData.attendees, // Store the whole array in JSONB
                     user_email: primaryEmail, // CORRECTED: Use user_email
                     user_phone: primaryPhone, // CORRECTED: Use user_phone
+                    // ADDED: Set user_name here from primary attendee
+                    user_name: `${bookingData.attendees[0]?.firstName || ''} ${bookingData.attendees[0]?.lastName || ''}`
                 })
-                .eq('id', newBookingId);
+                .eq('id', newBookingId)
+                .select(); // Select the updated row to confirm
 
             if (updateError) {
-                // Log the error, maybe try to roll back or notify admin?
-                // For now, log and continue, but the booking record will be incomplete.
-                console.error(`Failed to update booking ${newBookingId} with attendee details:`, updateError.message);
-                // Potentially return an error here if this update is critical
-                // return NextResponse.json({ error: 'Failed to save attendee details.', details: updateError.message }, { status: 500 });
+                 // --- MODIFIED Logging on error ---
+                console.error(`FAILED to update booking ${newBookingId} with attendee details:`, updateError); // Log full error object
+                // Decide whether to proceed? For now, let GCal happen but log error.
+            } else {
+                // --- ADDED Logging on success --- 
+                 console.log(`Successfully ran update query for booking ID: ${newBookingId}.`);
+                 if (!updateData || updateData.length === 0) {
+                     console.warn(`Booking update query for ID ${newBookingId} succeeded BUT returned no data. Row might not exist or condition failed?`);
+                 } else {
+                     console.log(`Booking ${newBookingId} confirmed updated with attendee details. Data:`, JSON.stringify(updateData));
+                 }
             }
         } catch(updateCatchError: any) {
-             console.error(`Exception during booking update for ${newBookingId}:`, updateCatchError.message);
+             // --- MODIFIED Logging on exception ---
+             console.error(`Exception during booking update logic for ${newBookingId}:`, updateCatchError); 
         }
 
         // ---- Google Calendar Event Creation ----
@@ -180,22 +190,23 @@ export async function POST(request: NextRequest) {
             treatmentsDurationData.forEach(t => treatmentDurationMap.set(t.id, { name: t.name, duration_200: t.duration_minutes_200ml, duration_1000: t.duration_minutes_1000ml }));
 
             // --- CORRECTED: Calculate finalSlotsNeeded for GCal End Time --- 
-            let max_duration_gcal = 0;
-            for (const attendee of bookingData.attendees) {
-                 const lookupIdGcal = typeof attendee.treatmentId === 'string' ? parseInt(attendee.treatmentId, 10) : attendee.treatmentId;
-                 const durationInfoGcal = treatmentDurationMap.get(lookupIdGcal);
-                 if (durationInfoGcal) {
-                    const currentDurationGcal = attendee.fluidOption === '200ml' 
-                        ? durationInfoGcal.duration_200 
-                        : durationInfoGcal.duration_1000;
-                    max_duration_gcal = Math.max(max_duration_gcal, currentDurationGcal);
-                 } 
-                 // No need to error here as treatment presence is validated earlier
-            }
-            const durationSlotsNeededGcal = (max_duration_gcal > 30) ? 2 : 1;
-            const capacitySlotsNeededGcal = Math.ceil(bookingData.attendeeCount / 2.0);
-            const finalSlotsNeededGcal = Math.max(durationSlotsNeededGcal, capacitySlotsNeededGcal);
-            // --- END Calculation --- 
+            // --- REMOVED: GCal specific calculation - use actualSlotSpan now ---
+            // let max_duration_gcal = 0;
+            // for (const attendee of bookingData.attendees) {
+            //      const lookupIdGcal = typeof attendee.treatmentId === 'string' ? parseInt(attendee.treatmentId, 10) : attendee.treatmentId;
+            //      const durationInfoGcal = treatmentDurationMap.get(lookupIdGcal);
+            //      if (durationInfoGcal) {
+            //         const currentDurationGcal = attendee.fluidOption === '200ml' 
+            //             ? durationInfoGcal.duration_200 
+            //             : durationInfoGcal.duration_1000;
+            //         max_duration_gcal = Math.max(max_duration_gcal, currentDurationGcal);
+            //      } 
+            //      // No need to error here as treatment presence is validated earlier
+            // }
+            // const durationSlotsNeededGcal = (max_duration_gcal > 30) ? 2 : 1;
+            // const capacitySlotsNeededGcal = Math.ceil(bookingData.attendeeCount / 2.0);
+            // const finalSlotsNeededGcal = Math.max(durationSlotsNeededGcal, capacitySlotsNeededGcal);
+            // --- END Removal --- 
 
             // Fetch the start times and end times of the booked slots using the CORRECT number of slots
             // const slotsNeeded = Math.ceil(bookingData.attendeeCount / 2.0); // OLD calculation
@@ -205,12 +216,13 @@ export async function POST(request: NextRequest) {
                 .eq('location_id', bookingData.loungeLocationId)
                 .gte('start_time', bookingData.selectedStartTime)
                 .order('start_time', { ascending: true })
-                .limit(finalSlotsNeededGcal); // <<< CORRECTED: Use finalSlotsNeededGcal
+                .limit(actualSlotSpan); // <<< CORRECTED: Use actualSlotSpan from RPC result
 
-            if (bookedSlotsError || !bookedSlotsData || bookedSlotsData.length < finalSlotsNeededGcal) { // Check against finalSlotsNeededGcal
-                 throw new Error(`Failed to fetch details of booked slots (required: ${finalSlotsNeededGcal}) for booking ${newBookingId}: ${bookedSlotsError?.message}`);
+            if (bookedSlotsError || !bookedSlotsData || bookedSlotsData.length < actualSlotSpan) { // Check against actualSlotSpan
+                 throw new Error(`Failed to fetch details of booked slots (required: ${actualSlotSpan}) for booking ${newBookingId}: ${bookedSlotsError?.message}`);
             }
-            const endTime = bookedSlotsData[bookedSlotsData.length - 1].end_time; // Get end time of the last slot in the block
+            // Ensure we use the last slot in the *actual span*
+            const endTime = bookedSlotsData[actualSlotSpan - 1].end_time; 
 
             // --- GCal Event Details ---
             if (locationError || !locationData || !locationData.google_calendar_id) {

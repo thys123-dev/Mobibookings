@@ -92,6 +92,26 @@ export default function StepAttendeeDetails({
       return treatmentsList.find(t => String(t.id) === String(treatmentId));
   }
 
+  // --- NEW: Calculate total cost --- 
+  const totalCost = useMemo(() => {
+    if (!formData.attendees || formData.attendees.length === 0) {
+        return 0;
+    }
+    
+    return formData.attendees.reduce((total, attendee) => {
+        const treatment = getTreatmentDetails(attendee.treatmentId);
+        if (!treatment || !attendee.fluidOption) {
+            return total; // Don't add cost if treatment or fluid not selected
+        }
+        
+        let currentCost = treatment.price;
+        if (attendee.fluidOption === '1000ml_dextrose') {
+            currentCost += DEXTROSE_EXTRA_COST;
+        }
+        return total + currentCost;
+    }, 0);
+  }, [formData.attendees, treatmentsList]); // Recalculate if attendees or treatments change
+
   return (
     <div className="space-y-6">
       <h2 className="text-xl font-semibold">Step 2: Attendee Details & Treatment Selection</h2>
@@ -124,82 +144,82 @@ export default function StepAttendeeDetails({
               <div key={index} className="p-4 border rounded-md space-y-4 mt-4">
                   <h3 className="text-lg font-medium">Attendee {index + 1}</h3>
                   {/* Name Inputs */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
                           <Label htmlFor={`attendee-${index}-firstName`}>First Name</Label>
-                          <Input
+              <Input
                               id={`attendee-${index}-firstName`}
                               name="firstName" // Key within the attendee object
                               value={attendeeData.firstName || ''}
                               onChange={(e) => handleAttendeeInputChange(index, e)}
-                              required
-                              className="mt-1"
-                          />
-                      </div>
-                      <div>
+                  required
+                  className="mt-1"
+              />
+          </div>
+          <div>
                           <Label htmlFor={`attendee-${index}-lastName`}>Last Name</Label>
-                          <Input
+              <Input
                               id={`attendee-${index}-lastName`}
                               name="lastName" // Key within the attendee object
                               value={attendeeData.lastName || ''}
                               onChange={(e) => handleAttendeeInputChange(index, e)}
-                              required
-                              className="mt-1"
-                          />
-                      </div>
+                  required
+                  className="mt-1"
+              />
+          </div>
                   </div>
 
                   {/* ADDED: Email and Phone Inputs */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <div>
+          <div>
                           <Label htmlFor={`attendee-${index}-email`}>Email</Label>
-                          <Input
+              <Input
                               id={`attendee-${index}-email`}
-                              name="email"
-                              type="email"
+                  name="email"
+                  type="email"
                               value={attendeeData.email || ''}
                               onChange={(e) => handleAttendeeInputChange(index, e)}
-                              required
-                              className="mt-1"
-                          />
-                      </div>
-                       <div>
+                  required
+                  className="mt-1"
+              />
+          </div>
+          <div>
                           <Label htmlFor={`attendee-${index}-phone`}>Phone Number</Label>
-                          <Input
+              <Input
                               id={`attendee-${index}-phone`}
-                              name="phone"
+                  name="phone"
                               type="tel" // Use type="tel" for better mobile experience
                               value={attendeeData.phone || ''}
                               onChange={(e) => handleAttendeeInputChange(index, e)}
-                              required
-                              className="mt-1"
-                          />
-                      </div>
-                  </div>
+                  required
+                  className="mt-1"
+              />
+          </div>
+      </div>
 
                   {/* Treatment Selection */}
-                  <div>
+          <div>
                       <Label htmlFor={`attendee-${index}-treatment`}>IV Treatment</Label>
-                      <Select
+            <Select
                           value={attendeeData.treatmentId ? String(attendeeData.treatmentId) : ''}
                           onValueChange={(value) => handleAttendeeTreatmentSelect(index, value)}
-                          required
-                      >
+              required
+            >
                           <SelectTrigger id={`attendee-${index}-treatment`}>
-                              <SelectValue placeholder="Select a treatment..." />
-                          </SelectTrigger>
-                          <SelectContent className="max-h-72 overflow-y-auto">
+                <SelectValue placeholder="Select a treatment..." />
+              </SelectTrigger>
+              <SelectContent className="max-h-72 overflow-y-auto">
                               {isLoadingTreatments && <SelectItem value="loading" disabled>Loading...</SelectItem>}
                               {treatmentError && <SelectItem value="error" disabled>Error loading</SelectItem>}
                               {!isLoadingTreatments && !treatmentError && treatmentsList.map((treatment) => (
-                                  <SelectItem key={treatment.id} value={String(treatment.id)}>
-                                      {treatment.name}
-                                  </SelectItem>
-                              ))}
-                          </SelectContent>
-                      </Select>
-                  </div>
-                  
+                  <SelectItem key={treatment.id} value={String(treatment.id)}>
+                    {treatment.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
                   {/* NEW: Fluid Option Selection */}
                   {selectedTreatment && (
                   <div className="pt-2">
@@ -246,9 +266,9 @@ export default function StepAttendeeDetails({
                     <div className="p-2 border rounded-md bg-muted/50 text-sm mt-2">
                       <p><strong>Price:</strong> {displayPrice !== undefined ? `R ${displayPrice.toFixed(2)}` : 'N/A'}</p>
                       <p><strong>Duration:</strong> {displayDuration !== undefined ? `${displayDuration} minutes` : 'N/A'}</p>
-                    </div>
-                  )}
-              </div>
+            </div>
+          )}
+        </div>
           );
       })}
 
@@ -265,6 +285,11 @@ export default function StepAttendeeDetails({
             <AlertDescription>{treatmentError}</AlertDescription>
           </Alert>
       )}
+
+      {/* --- ADDED: Display Total Cost --- */}
+      <div className="mt-6 pt-4 border-t">
+          <p className="text-lg font-semibold text-right">Total Estimated Cost: R {totalCost.toFixed(2)}</p>
+      </div>
 
     </div>
   );
