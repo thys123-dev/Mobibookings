@@ -16,6 +16,8 @@ const attendeeSchema = z.object({
     fluidOption: z.enum(['200ml', '1000ml', '1000ml_dextrose'], { required_error: "Fluid option selection is required for each attendee" }),
     // --- NEW: Add optional add-on treatment ID ---
     addOnTreatmentId: z.union([z.number(), z.string()]).nullable().optional(),
+    // --- NEW: Add optional additional vitamin ID ---
+    additionalVitaminId: z.union([z.number(), z.string()]).nullable().optional(),
 });
 
 // Zod schema for strict validation of incoming data
@@ -48,6 +50,12 @@ interface TreatmentDbInfo {
     id: number | string;
     name: string;
     // No duration needed here, just name for GCal mapping
+}
+
+// --- NEW: Type for Vitamin data fetched from DB for GCal ---
+interface VitaminDbInfo {
+    id: number | string;
+    name: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -185,20 +193,42 @@ export async function POST(request: NextRequest) {
                     .filter(id => id !== null && id !== undefined && String(id).length > 0)
             ));
             // Combine both sets of IDs for a single query
-            const allUniqueIds = Array.from(new Set([...uniqueTreatmentIds, ...uniqueAddOnTreatmentIds]));
+            const allUniqueTreatmentAndAddOnIds = Array.from(new Set([...uniqueTreatmentIds, ...uniqueAddOnTreatmentIds]));
 
-            const { data: treatmentsData, error: treatmentsError } = await supabaseAdmin
+            const { data: treatmentsAndAddOnsData, error: treatmentsAndAddOnsError } = await supabaseAdmin
                 .from('treatments')
                 .select('id, name') // Only need id and name for GCal description mapping
-                .in('id', allUniqueIds); // Fetch details for both base and add-on treatments
+                .in('id', allUniqueTreatmentAndAddOnIds); // Fetch details for both base and add-on treatments
 
-            if (treatmentsError || !treatmentsData) {
-                 throw new Error(`Failed to fetch treatment details: ${treatmentsError?.message}`);
+            if (treatmentsAndAddOnsError || !treatmentsAndAddOnsData) {
+                 throw new Error(`Failed to fetch treatment and add-on details: ${treatmentsAndAddOnsError?.message}`);
             }
 
             // Create a map for easy lookup (handles both base and add-on names)
-            const treatmentInfoMap = new Map<string | number, { name: string }>();
-            treatmentsData.forEach(t => treatmentInfoMap.set(t.id, { name: t.name }));
+            const treatmentAndAddOnInfoMap = new Map<string | number, { name: string }>();
+            treatmentsAndAddOnsData.forEach(t => treatmentAndAddOnInfoMap.set(t.id, { name: t.name }));
+
+            // --- NEW: Fetch Vitamin names for ALL attendees ---
+            const uniqueVitaminIds = Array.from(new Set(
+                bookingData.attendees
+                    .map(a => a.additionalVitaminId)
+                    .filter(id => id !== null && id !== undefined && String(id).length > 0)
+            ));
+
+            let vitaminInfoMap = new Map<string | number, { name: string }>();
+            if (uniqueVitaminIds.length > 0) {
+                const { data: vitaminsData, error: vitaminsError } = await supabaseAdmin
+                    .from('additional_vitamins')
+                    .select('id, name')
+                    .in('id', uniqueVitaminIds);
+
+                if (vitaminsError || !vitaminsData) {
+                    // Log error but don't necessarily fail the booking if vitamins can't be fetched for GCal
+                    console.error(`Failed to fetch vitamin details for GCal: ${vitaminsError?.message}`);
+                } else {
+                    vitaminsData.forEach(v => vitaminInfoMap.set(v.id, { name: v.name }));
+                }
+            }
 
             // --- Fetch treatment durations (both 200ml and 1000ml) ---
             // --- NOTE: Duration fetch only needs BASE treatment IDs ---
@@ -236,9 +266,9 @@ export async function POST(request: NextRequest) {
             if (!endTime) {
                  throw new Error(`Missing end_time for the last booked slot`);
             }
-            if (treatmentInfoMap.size !== uniqueTreatmentIds.length) {
+            if (treatmentAndAddOnInfoMap.size !== allUniqueTreatmentAndAddOnIds.length) {
                  // Check if we found info for all requested unique treatments
-                 console.warn(`Could not find details for all treatment IDs requested. Found: ${treatmentInfoMap.size}, Requested unique: ${uniqueTreatmentIds.length}`);
+                 console.warn(`Could not find details for all treatment IDs requested. Found: ${treatmentAndAddOnInfoMap.size}, Requested unique: ${allUniqueTreatmentAndAddOnIds.length}`);
                  // Decide if this is a fatal error or just continue with partial info
             }
 
@@ -272,7 +302,7 @@ export async function POST(request: NextRequest) {
             bookingData.attendees.forEach((attendee, index) => {
                 // Convert attendee.treatmentId (likely string) to number for map lookup
                 const lookupId = typeof attendee.treatmentId === 'string' ? parseInt(attendee.treatmentId, 10) : attendee.treatmentId;
-                const treatmentDetails = treatmentDurationMap.get(lookupId);
+                const treatmentDetails = treatmentDurationMap.get(lookupId); // For duration and base name
                 const treatmentName = treatmentDetails ? treatmentDetails.name : `Unknown Treatment (ID: ${attendee.treatmentId})`;
                 
                 // Determine correct duration based on fluidOption AND add-on
@@ -286,25 +316,30 @@ export async function POST(request: NextRequest) {
                 }
                 
                 // ADDED: Include email/phone/fluid/duration in GCal description per attendee
-                eventDescription += `  ${index + 1}. ${attendee.firstName} ${attendee.lastName}
-` +
-                                  `     Email: ${attendee.email}
-` +
-                                  `     Phone: ${attendee.phone}
-` +
-                                  `     Treatment: ${treatmentName}
-` +
-                                  `     Fluid: ${attendee.fluidOption || 'N/A'} ${attendee.fluidOption === '1000ml_dextrose' ? '(+Dextrose)' : ''}
-` +
-                                  `     Duration: ${duration}
-`;
-                // --- NEW: Add Add-on treatment if present ---
+                // Reordered and added Vitamins
+                eventDescription += `  ${index + 1}. ${attendee.firstName} ${attendee.lastName}\n` +
+                                  `     Email: ${attendee.email}\n` +
+                                  `     Phone: ${attendee.phone}\n` +
+                                  `     Treatment: ${treatmentName}\n` +
+                                  `     Fluid: ${attendee.fluidOption || 'N/A'}${attendee.fluidOption === '1000ml_dextrose' ? ' (+Dextrose)' : ''}\n`;
+                
+                // Add Add-on treatment if present
                 if (attendee.addOnTreatmentId) {
                     const addOnLookupId = typeof attendee.addOnTreatmentId === 'string' ? parseInt(attendee.addOnTreatmentId, 10) : attendee.addOnTreatmentId;
-                    const addOnDetails = treatmentInfoMap.get(addOnLookupId);
+                    const addOnDetails = treatmentAndAddOnInfoMap.get(addOnLookupId); // Use the renamed map
                     const addOnName = addOnDetails ? addOnDetails.name : `Unknown Add-on (ID: ${attendee.addOnTreatmentId})`;
-                    eventDescription += `     Add-on: ${addOnName}\n`; // Added newline for clarity
+                    eventDescription += `     Add-on: ${addOnName}\n`;
                 }
+
+                // Add Vitamin if present
+                if (attendee.additionalVitaminId) {
+                    const vitaminLookupId = typeof attendee.additionalVitaminId === 'string' ? parseInt(attendee.additionalVitaminId, 10) : attendee.additionalVitaminId;
+                    const vitaminDetails = vitaminInfoMap.get(vitaminLookupId);
+                    const vitaminName = vitaminDetails ? vitaminDetails.name : `Unknown Vitamin (ID: ${attendee.additionalVitaminId})`;
+                    eventDescription += `     Vitamins: ${vitaminName}\n`;
+                }
+
+                eventDescription += `     Duration: ${duration}\n`;
             });
 
             googleEventId = await createCalendarEvent({

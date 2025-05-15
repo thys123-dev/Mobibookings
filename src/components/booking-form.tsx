@@ -23,6 +23,13 @@ interface Treatment {
   duration_minutes_1000ml: number;
 }
 
+// --- Define Vitamin Type (can be moved to a shared types file later) ---
+interface Vitamin {
+  id: number | string; // Assuming id from DB can be number or string
+  name: string;
+  price: number;
+}
+
 // --- NEW: Define Attendee Data structure ---
 export interface AttendeeData {
   // Using optional key for temporary state before saved?
@@ -38,6 +45,7 @@ export interface AttendeeData {
   fluidOption?: '200ml' | '1000ml' | '1000ml_dextrose' | ''; // Add '' for initial state
   // --- NEW: Add optional add-on treatment ID ---
   addOnTreatmentId?: string | number | null; // Optional, can be string, number, or null
+  additionalVitaminId?: string | number | null; // Optional: For selected vitamin
   // Display-only fields, maybe populated later?
   // treatmentName?: string;
   // treatmentPrice?: number;
@@ -77,6 +85,7 @@ const attendeeSchema = z.object({
     // Make fluidOption optional initially
     fluidOption: z.enum(['200ml', '1000ml', '1000ml_dextrose']).optional(),
     addOnTreatmentId: z.union([z.number(), z.string()]).nullable().optional(),
+    additionalVitaminId: z.union([z.number(), z.string()]).nullable().optional(), // Added for vitamins
 }).superRefine((data, ctx) => {
     // Conditionally require fluidOption only if addOnTreatmentId is NOT selected
     if (!data.addOnTreatmentId && !data.fluidOption) {
@@ -138,6 +147,11 @@ export default function BookingForm() {
     const [isLoadingTreatments, setIsLoadingTreatments] = useState(true);
     const [treatmentError, setTreatmentError] = useState<string | null>(null);
 
+    // --- NEW: State for vitamins --- 
+    const [vitaminsList, setVitaminsList] = useState<Vitamin[]>([]);
+    const [isLoadingVitamins, setIsLoadingVitamins] = useState(true);
+    const [vitaminError, setVitaminError] = useState<string | null>(null);
+
     console.log('*** Rendering BookingForm, currentStep:', currentStep);
 
     // --- NEW: Initialize react-hook-form --- 
@@ -153,6 +167,7 @@ export default function BookingForm() {
                 treatmentId: undefined,
                 fluidOption: undefined,
                 addOnTreatmentId: null,
+                additionalVitaminId: null, // Initialize new field
             }]
             // Initialize other fields as needed
             // destinationType: undefined,
@@ -200,6 +215,31 @@ export default function BookingForm() {
       fetchTreatments();
     }, []); // Empty dependency array means run once on mount
 
+    // --- NEW: useEffect to fetch vitamins ---
+    useEffect(() => {
+      const fetchVitamins = async () => {
+        setIsLoadingVitamins(true);
+        setVitaminError(null);
+        try {
+          const response = await fetch('/api/vitamins');
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || `HTTP error ${response.status}`);
+          }
+          const data: Vitamin[] = await response.json();
+          // Add a "-- None --" option at the beginning for the dropdown
+          setVitaminsList([{ id: 'none', name: '-- None --', price: 0 }, ...data]);
+        } catch (error: any) {
+          console.error("Failed to fetch vitamins:", error);
+          setVitaminError(error.message || "Could not load vitamins.");
+        } finally {
+          setIsLoadingVitamins(false);
+        }
+      };
+
+      fetchVitamins();
+    }, []);
+
     // --- Sync attendees array size with attendeeCount --- 
     useEffect(() => {
         const currentAttendees = watchedAttendees || [];
@@ -214,6 +254,7 @@ export default function BookingForm() {
                      treatmentId: undefined,
                      fluidOption: undefined,
                      addOnTreatmentId: null,
+                     additionalVitaminId: null, // Initialize new field
                  }
             ));
             form.setValue('attendees', newAttendees, { shouldValidate: true });
@@ -312,6 +353,10 @@ export default function BookingForm() {
                             treatmentsList={treatmentsList}
                             isLoadingTreatments={isLoadingTreatments}
                             treatmentError={treatmentError}
+                            // Pass vitamin props
+                            vitaminsList={vitaminsList}
+                            isLoadingVitamins={isLoadingVitamins}
+                            vitaminError={vitaminError}
                        />;
             case 3:
                 if (watchedDestinationType === 'lounge') {
@@ -330,6 +375,8 @@ export default function BookingForm() {
                             // Pass the form values for display
                             formData={form.getValues()} 
                             treatmentsList={treatmentsList}
+                            // Pass vitamin list for confirmation display
+                            vitaminsList={vitaminsList}
                        />;
             default:
                 return <div>Invalid Step</div>;

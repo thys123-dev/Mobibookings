@@ -17,9 +17,17 @@ interface Treatment {
   duration_minutes_1000ml: number;
 }
 
+// Vitamin interface - assuming it will be available from props or a shared type
+interface Vitamin {
+  id: number | string;
+  name: string;
+  price: number;
+}
+
 interface StepConfirmationProps {
     formData: BookingFormData;
     treatmentsList: Treatment[];
+    vitaminsList: Vitamin[]; // Add vitaminsList prop
 }
 
 // Helper function to find name from ID
@@ -27,7 +35,7 @@ const findNameById = (id: string | undefined, list: { id: string; name: string }
     return list.find(item => item.id === id)?.name || 'N/A';
 };
 
-export default function StepConfirmation({ formData, treatmentsList }: StepConfirmationProps) {
+export default function StepConfirmation({ formData, treatmentsList, vitaminsList }: StepConfirmationProps) {
 
     const {
         destinationType,
@@ -63,6 +71,13 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
         return treatmentsList.find(t => String(t.id) === String(treatmentId));
     }
 
+    // Helper to get vitamin details
+    const getVitaminDetails = (vitaminId: string | number | undefined | null): Vitamin | undefined => {
+      if (!vitaminId || vitaminId === 'none') return undefined;
+      // Use vitaminsList from props (formData doesn't contain it, it comes from BookingForm directly)
+      return vitaminsList.find(v => String(v.id) === String(vitaminId));
+    }
+
     const DEXTROSE_EXTRA_COST = 200; // Define cost here too for consistency
 
     // --- NEW: Calculate total cost (same logic as Step 2) --- 
@@ -74,6 +89,7 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
         return attendees.reduce((total, attendee) => {
             const treatment = getTreatmentDetails(attendee.treatmentId);
             const addOnTreatment = getTreatmentDetails(attendee.addOnTreatmentId); // Get add-on details
+            const selectedVitamin = getVitaminDetails(attendee.additionalVitaminId);
 
             let currentCost = 0; // Start cost at 0
             
@@ -82,9 +98,14 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
 
                 if (addOnTreatment) {
                     currentCost += addOnTreatment.price || 0; // Add add-on price if it also exists
-                } else if (attendee.fluidOption === '1000ml_dextrose') {
-                    // Add Dextrose cost only if NO add-on
+                }
+                // Always add Dextrose cost if selected, independently of add-on
+                if (attendee.fluidOption === '1000ml_dextrose') {
                      currentCost += DEXTROSE_EXTRA_COST;
+                }
+                // Add vitamin cost
+                if (selectedVitamin) {
+                    currentCost += selectedVitamin.price || 0;
                 }
             }
             // No need to check treatment again here, already handled above
@@ -152,19 +173,29 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
                         attendees.map((attendee, index) => {
                             const treatment = getTreatmentDetails(attendee.treatmentId);
                             const addOnTreatment = getTreatmentById(attendee.addOnTreatmentId); // Define addOnTreatment HERE
+                            const selectedVitamin = getVitaminDetails(attendee.additionalVitaminId);
                             
                             // Calculate display price and duration based on fluid option
                             const displayPrice = useMemo(() => {
-                                if (!treatment || !attendee.fluidOption) {
+                                if (!treatment) { // Only need base treatment to exist
                                     return undefined;
                                 }
                                 
                                 let currentCost = treatment.price;
+                                // Add add-on treatment price if it exists
+                                if (addOnTreatment) {
+                                    currentCost += addOnTreatment.price || 0;
+                                }
+                                // Add Dextrose cost if selected
                                 if (attendee.fluidOption === '1000ml_dextrose') {
                                     currentCost += DEXTROSE_EXTRA_COST;
                                 }
+                                // Add vitamin cost
+                                if (selectedVitamin) {
+                                    currentCost += selectedVitamin.price || 0;
+                                }
                                 return currentCost;
-                            }, [treatment, attendee.fluidOption]);
+                            }, [treatment, addOnTreatment, attendee.fluidOption, selectedVitamin]);
 
                             // ADJUST Duration logic for confirmation page
                             let displayDurationText = 'N/A';
@@ -187,34 +218,41 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
                                 <div key={index} className="p-3 border rounded-md bg-muted/30 space-y-2">
                                      <h4 className="font-medium">Attendee {index + 1}: {attendee.firstName || 'N/A'} {attendee.lastName || 'N/A'}</h4>
                                      <div className="grid grid-cols-[auto_1fr] gap-x-2 text-sm">
-                                         <Label className="text-right">Treatment:</Label>
-                                         <span>{treatment?.name || 'N/A'}</span>
-
-                                         {/* ADDED: Display Fluid Option */}
-                                        <Label className="text-right">Fluid:</Label>
-                                        <span>{fluidText}</span>
-
-                                         <Label className="text-right">Price:</Label>
-                                         <span>{displayPrice !== undefined ? `R ${displayPrice.toFixed(2)}` : 'N/A'}</span>
-
-                                         <Label className="text-right">Duration:</Label>
-                                         {/* Use the adjusted duration text */}
-                                         <span>{displayDurationText}</span>
-
-                                        {/* Display Email and Phone per attendee */}
+                                         {/* Display Email and Phone per attendee - MOVED UP */}
                                         <Label className="text-right">Email:</Label>
                                         <span>{attendee.email || 'N/A'}</span>
 
                                         <Label className="text-right">Phone:</Label>
                                         <span>{attendee.phone || 'N/A'}</span>
+                                        
+                                         <Label className="text-right">Treatment:</Label>
+                                         <span>{treatment?.name || 'N/A'}</span>
+
+                                        {/* ADDED: Display Fluid Option */}
+                                        <Label className="text-right">Fluid:</Label>
+                                        <span>{fluidText}</span>
 
                                         {/* Display Add-on Treatment - Styled like others, with price */} 
                                         {addOnTreatment && (
                                             <>
                                                 <Label className="text-right font-semibold">Add-on:</Label>
-                                                <span>{addOnTreatment.name} {addOnTreatment.price ? `(R ${addOnTreatment.price.toFixed(2)})` : ''}</span>
+                                                <span>{addOnTreatment.name} {addOnTreatment.price ? `(R ${addOnTreatment.price.toFixed(0)})` : ''}</span>
                                             </>
                                         )}
+                                        {/* Display Selected Vitamin */}
+                                        {selectedVitamin && selectedVitamin.id !== 'none' && (
+                                            <>
+                                                <Label className="text-right font-semibold">Vitamin:</Label>
+                                                <span>{selectedVitamin.name} {selectedVitamin.price > 0 ? `(R ${selectedVitamin.price.toFixed(0)})` : ''}</span>
+                                            </>
+                                        )}
+
+                                         <Label className="text-right">Duration:</Label>
+                                         {/* Use the adjusted duration text */}
+                                         <span>{displayDurationText}</span>
+
+                                         <Label className="text-right">Price:</Label>
+                                         <span>{displayPrice !== undefined ? `R ${displayPrice.toFixed(0)}` : 'N/A'}</span>
                                      </div>
                                 </div>
                             );
@@ -222,7 +260,7 @@ export default function StepConfirmation({ formData, treatmentsList }: StepConfi
                     )}
                      {/* --- ADDED: Display Total Cost --- */}
                      <div className="mt-4 pt-4 border-t">
-                         <p className="text-lg font-semibold text-right">Total Estimated Cost: R {totalCost.toFixed(2)}</p>
+                         <p className="text-lg font-semibold text-right">Total Estimated Cost: R {totalCost.toFixed(0)}</p>
                     </div>
 
                     <p className="text-xs text-gray-600 pt-4">Please review all details carefully. Clicking "Submit Booking" will finalize your request.</p>
