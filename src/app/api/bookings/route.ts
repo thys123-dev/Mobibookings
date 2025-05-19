@@ -22,7 +22,7 @@ const attendeeSchema = z.object({
 
 // Zod schema for strict validation of incoming data
 const bookingSchema = z.object({
-    loungeLocationId: z.string().min(1, { message: "Location ID is required" }),
+    loungeLocationId: z.string().min(1, { message: "Location ID (or Dispatch Lounge ID for mobile) is required" }),
     selectedStartTime: z.string().datetime({ message: "Valid ISO 8601 start time string is required" }), // Use z.datetime()
     attendeeCount: z.number().int().min(1),
     // Primary contact info (read from request, will be overwritten by attendee[0] before DB update)
@@ -30,16 +30,26 @@ const bookingSchema = z.object({
     phone: z.string().min(1, { message: "Valid primary contact phone number is required" }),
     // --- MODIFIED: Use attendees array ---
     attendees: z.array(attendeeSchema).min(1, { message: "At least one attendee's details must be provided" }),
+    // --- NEW: Add destinationType and clientAddress ---
+    destinationType: z.enum(['lounge', 'mobile'], { required_error: "Destination type ('lounge' or 'mobile') is required" }),
+    clientAddress: z.string().optional(), // Address for mobile service
     // --- REMOVED individual fields ---
     // firstName: z.string().min(1, { message: "First name is required" }),
     // lastName: z.string().min(1, { message: "Last name is required" }),
     // treatmentId: z.union([z.number(), z.string()]).refine(val => val !== undefined && val !== null, { message: "Treatment ID is required" }),
-    destinationType: z.literal('lounge'),
-    // Optional fields from frontend, not strictly needed for backend logic if treatmentId is present
     // treatmentPrice: z.number().optional(),
     // treatmentDuration: z.number().optional(),
     selectedDate: z.string().optional(), // Keep for potential future use
     selectedTimeSlotId: z.union([z.number(), z.string()]).optional(), // Keep for potential future use or if switching from RPC
+}).refine(data => {
+    // If destinationType is 'mobile', clientAddress must be provided and be a non-empty string
+    if (data.destinationType === 'mobile') {
+        return typeof data.clientAddress === 'string' && data.clientAddress.trim().length > 0;
+    }
+    return true; // For 'lounge', clientAddress is not required
+}, {
+    message: "Client address is required for mobile service bookings.",
+    path: ['clientAddress'], // Specify the path of the error
 });
 
 // Infer the TypeScript type from the Zod schema
@@ -65,34 +75,82 @@ export async function POST(request: NextRequest) {
     // Declare primary contact variables here for wider scope
     let primaryEmail: string | undefined | null = null;
     let primaryPhone: string | undefined | null = null;
+    // --- NEW: Helper for mobile service ---
+    let isMobileService = false;
 
     try {
         supabaseAdmin = getSupabaseAdmin();
         const rawData = await request.json();
+        console.log("--- Received Raw Booking Request Data ---", JSON.stringify(rawData, null, 2)); // Log raw data
         bookingData = bookingSchema.parse(rawData);
+        console.log("--- Parsed and Validated Booking Data ---", JSON.stringify(bookingData, null, 2)); // Log parsed data
+
+        // --- NEW: Set helper for mobile service ---
+        isMobileService = bookingData.destinationType === 'mobile';
 
         // --- Validation: Ensure attendee array count matches attendeeCount ---
         if (bookingData.attendees.length !== bookingData.attendeeCount) {
             return NextResponse.json({ error: 'Attendee details count does not match attendee count.' }, { status: 400 });
         }
 
-        if (bookingData.destinationType !== 'lounge') {
-            return NextResponse.json({ error: 'Invalid booking type' }, { status: 400 });
+        if (isMobileService && (!bookingData.clientAddress || bookingData.clientAddress.trim() === '')) {
+            // This is now covered by Zod .refine, but an explicit check can remain for clarity or specific error message.
+            // However, Zod refine should make this redundant. If Zod parse fails, it won't reach here.
+            // For safety, we can keep it or rely on Zod's error. Let's assume Zod handles it.
         }
 
-        // ---- Database Booking using RPC Function ----
-        const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc(
-            'book_appointment_multi_slot',
-            {
-            p_location_id: bookingData.loungeLocationId,
-            p_start_time: bookingData.selectedStartTime,
-                p_attendee_count: bookingData.attendeeCount,
-                p_attendees_details: bookingData.attendees
+        // --- MODIFIED: Conditional logic based on destination type for RPC call ---
+        let rpcResult, rpcError;
+
+        if (isMobileService) {
+            // ---- Mobile Booking Logic ----
+            // The client's selectedStartTime is the treatment start time (2nd slot)
+            // We need to calculate the actual start of the 4-slot block (30 mins prior)
+            const treatmentStartTime = new Date(bookingData.selectedStartTime);
+            const travelBlockStartTime = new Date(treatmentStartTime.getTime() - 30 * 60 * 1000).toISOString();
+            
+            console.log(`Mobile service booking attempt for dispatch lounge ${bookingData.loungeLocationId} at ${bookingData.clientAddress}, treatment start ${bookingData.selectedStartTime}, travel block start ${travelBlockStartTime}`);
+
+            // Ensure primary contact info is available for the RPC call
+            const primaryAttendeeForRPC = bookingData.attendees[0];
+            if (!primaryAttendeeForRPC || !primaryAttendeeForRPC.email || !primaryAttendeeForRPC.phone) {
+                // This should ideally be caught by Zod schema, but an explicit check before RPC is good.
+                console.error('Primary attendee email or phone missing for mobile booking RPC call.');
+                return NextResponse.json({ error: 'Primary attendee contact details are required.' }, { status: 400 });
             }
-        );
+
+            const paramsForMobileRpc = {
+                p_dispatch_lounge_id: bookingData.loungeLocationId,
+                p_start_time_for_travel: travelBlockStartTime,
+                p_client_address: bookingData.clientAddress,
+                p_attendees_details: bookingData.attendees,
+                p_attendee_count: bookingData.attendeeCount,
+                p_user_email: primaryAttendeeForRPC.email,
+                p_user_phone: primaryAttendeeForRPC.phone,
+                p_user_name: `${primaryAttendeeForRPC.firstName || ''} ${primaryAttendeeForRPC.lastName || ''}`
+            };
+            console.log("--- Params for book_mobile_appointment_v1 RPC ---", JSON.stringify(paramsForMobileRpc, null, 2)); // Log params for mobile RPC
+
+            ({ data: rpcResult, error: rpcError } = await supabaseAdmin.rpc(
+                'book_mobile_appointment_v1', 
+                paramsForMobileRpc
+            ));
+
+        } else {
+            // ---- Existing Lounge Booking Logic ----
+            ({ data: rpcResult, error: rpcError } = await supabaseAdmin.rpc(
+                'book_appointment_multi_slot',
+                {
+                    p_location_id: bookingData.loungeLocationId,
+                    p_start_time: bookingData.selectedStartTime,
+                    p_attendee_count: bookingData.attendeeCount,
+                    p_attendees_details: bookingData.attendees
+                }
+            ));
+        }
 
         if (rpcError) {
-            console.error('Supabase RPC Error (book_appointment_multi_slot):', rpcError);
+            console.error('Supabase RPC Error (full object):', JSON.stringify(rpcError, null, 2)); // Log full RPC error object
             // Handle specific errors raised by the function
             if (rpcError.message.includes('Insufficient consecutive slots')) {
                 return NextResponse.json({ error: 'Sorry, not enough consecutive time slots are available for your group size starting at this time.' }, { status: 409 });
@@ -150,7 +208,9 @@ export async function POST(request: NextRequest) {
                     user_email: primaryEmail, // CORRECTED: Use user_email
                     user_phone: primaryPhone, // CORRECTED: Use user_phone
                     // ADDED: Set user_name here from primary attendee
-                    user_name: `${bookingData.attendees[0]?.firstName || ''} ${bookingData.attendees[0]?.lastName || ''}`
+                    user_name: `${bookingData.attendees[0]?.firstName || ''} ${bookingData.attendees[0]?.lastName || ''}`,
+                    client_address: isMobileService ? bookingData.clientAddress : null,
+                    is_mobile_service: isMobileService, // Use the new column
                 })
                 .eq('id', newBookingId)
                 .select(); // Select the updated row to confirm
@@ -278,22 +338,30 @@ export async function POST(request: NextRequest) {
             if(bookingData.attendeeCount > 1) {
                  eventSummary += ` (+${bookingData.attendeeCount - 1} others)`;
             }
+            if (isMobileService) {
+                eventSummary += ` (Mobile Service)`;
+            }
 
             // Build detailed description
             let eventDescription =
                 `Booking Details:
 ` +
                 `Primary Contact (Attendee 1):
-` + // Clarify it's Attendee 1
+` +
                 `  Email: ${primaryEmail || 'N/A'}
-` + // Use primaryEmail variable (add fallback)
+` +
                 `  Phone: ${primaryPhone || 'N/A'}
-` + // Use primaryPhone variable (add fallback)
+` +
                 `Total Attendees: ${bookingData.attendeeCount}
 ` +
                 `Location: ${locationData.name}
-` +
-                `Booking ID: ${newBookingId}
+`;
+
+            if (isMobileService && bookingData.clientAddress) {
+                eventDescription += `Client Address: ${bookingData.clientAddress.replace(/'/g, "\'")}\n`; // Add client address if mobile service
+            }
+
+            eventDescription += `Booking ID: ${newBookingId}
 
 ` +
                 `Attendees & Treatments:
@@ -380,6 +448,11 @@ export async function POST(request: NextRequest) {
     } catch (error) {
         if (error instanceof z.ZodError) {
             console.error('Zod Validation Errors:', error.errors);
+            // --- NEW: Customize error message for clientAddress based on refine ---
+            const clientAddressError = error.errors.find(e => e.path.includes('clientAddress') && e.message === "Client address is required for mobile service bookings.");
+            if (clientAddressError) {
+                 return NextResponse.json({ error: clientAddressError.message, details: error.errors }, { status: 400 });
+            }
             return NextResponse.json({ error: 'Invalid input data', details: error.errors }, { status: 400 });
         }
         if (error instanceof Error && error.message.includes("admin client is not initialized")) {

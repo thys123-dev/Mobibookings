@@ -12,7 +12,19 @@ const attendeeAvailabilitySchema = z.object({
 const availabilityRequestSchema = z.object({
     locationId: z.string(),
     date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, { message: "Invalid date format, use YYYY-MM-DD" }),
-    attendees: z.array(attendeeAvailabilitySchema).min(1, { message: "At least one attendee is required" }),
+    attendees: z.array(attendeeAvailabilitySchema).min(1, { message: "At least one attendee is required" }).optional(),
+    destinationType: z.enum(['lounge', 'mobile']).default('lounge'),
+}).superRefine((data, ctx) => {
+    if (data.destinationType === 'lounge') {
+        if (!data.attendees || data.attendees.length === 0) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: "Attendees are required for lounge bookings.",
+                path: ['attendees'],
+            });
+        }
+    }
+    // No specific refinement needed for 'mobile' regarding attendees, as it's optional
 });
 
 // Type for treatment duration data fetched from DB
@@ -107,35 +119,12 @@ export async function POST(request: NextRequest) { // Ensure 'request' is used
     try {
         // --- Parse and Validate Input Data --- 
         const rawData = await request.json();
-        requestData = availabilityRequestSchema.parse(rawData); // Correct parsing
-        const { locationId, date, attendees } = requestData; // Correct destructuring
-        const attendeeCount = attendees.length;
-
-        // --- Fetch Treatment Durations --- 
-        const uniqueTreatmentIds = Array.from(new Set(attendees.map((a: z.infer<typeof attendeeAvailabilitySchema>) => // Add type annotation for 'a'
-            typeof a.treatmentId === 'string' ? parseInt(a.treatmentId, 10) : a.treatmentId
-        )));
-
-        if (uniqueTreatmentIds.some(id => isNaN(id as number))) { // Check NaN correctly
-            return NextResponse.json({ error: 'Invalid Treatment ID found.' }, { status: 400 });
-    }
-
-        const { data: treatmentDurations, error: durationError } = await supabase
-            .from('treatments')
-            .select('id, duration_minutes_200ml, duration_minutes_1000ml')
-            .in('id', uniqueTreatmentIds);
-
-        if (durationError) {
-            console.error('Supabase error fetching treatment durations:', durationError);
-            throw durationError;
-        }
-        if (!treatmentDurations || treatmentDurations.length !== uniqueTreatmentIds.length) {
-             console.warn('Could not fetch duration info for all requested treatments.');
-             return NextResponse.json({ error: 'Could not find duration details for all selected treatments.' }, { status: 404 });
-        }
-
-        const durationMap = new Map<string | number, TreatmentDurationInfo>();
-        treatmentDurations.forEach(t => durationMap.set(t.id, t));
+        requestData = availabilityRequestSchema.parse(rawData);
+        const { locationId, date, attendees, destinationType } = requestData; // attendees can now be undefined
+        const isMobileService = destinationType === 'mobile';
+        
+        // Conditionally access attendees.length only if attendees is defined (for lounge)
+        const attendeeCount = attendees ? attendees.length : 0; 
 
         // --- Fetch All Time Slots for the Day --- 
         const startOfDay = `${date}T00:00:00Z`;
@@ -144,7 +133,7 @@ export async function POST(request: NextRequest) { // Ensure 'request' is used
         const { data: allTimeSlots, error: slotsError } = await supabase
             .from('time_slots')
             .select('id, start_time, end_time, capacity, booked_count')
-            .eq('location_id', locationId)
+            .eq('location_id', locationId) // For mobile, this is dispatchLoungeId
             .gte('start_time', startOfDay)
             .lte('start_time', endOfDay)
             .order('start_time', { ascending: true });
@@ -158,36 +147,97 @@ export async function POST(request: NextRequest) { // Ensure 'request' is used
             return NextResponse.json([]); // No slots available for this day/location
         }
 
-        // === NEW: Calculate the required booking pattern ===
-        const { required_span, demand } = calculateBookingPattern(attendees, durationMap, 2); // Assuming capacity 2
-        // console.log(`Required Pattern: Span=${required_span}, Demand=${JSON.stringify(demand)}`);
-
-        // --- Filter Available Starting Slots based on Pattern --- 
         const availableStartingSlots = [];
-        for (let i = 0; i <= allTimeSlots.length - required_span; i++) {
-            const potentialBlock = allTimeSlots.slice(i, i + required_span);
-            let blockIsValid = true;
-            
-            // Check if EVERY slot in the block meets the specific demand for that position
-            for (let j = 0; j < required_span; j++) {
-                const slot = potentialBlock[j];
-                const requiredSeats = demand[j] || 0; // Get demand for this position
-                const availableSeats = slot.capacity - slot.booked_count;
-                
-                if (availableSeats < requiredSeats) {
-                    blockIsValid = false;
-                    break; // This starting slot `i` is invalid
+
+        if (isMobileService) {
+            // --- Mobile Service Availability Logic ---
+            const requiredConsecutiveSlots = 4;
+            const requiredSeatsPerSlot = 2;
+
+            for (let i = 0; i <= allTimeSlots.length - requiredConsecutiveSlots; i++) {
+                const potentialBlock = allTimeSlots.slice(i, i + requiredConsecutiveSlots);
+                let blockIsValid = true;
+
+                for (let j = 0; j < requiredConsecutiveSlots; j++) {
+                    const slot = potentialBlock[j];
+                    const availableSeats = slot.capacity - slot.booked_count;
+                    if (availableSeats < requiredSeatsPerSlot) {
+                        blockIsValid = false;
+                        break;
+                    }
+                }
+
+                if (blockIsValid) {
+                    // For mobile, display the start time of the SECOND slot
+                    // The first slot is for travel.
+                    const treatmentStartingSlot = potentialBlock[1]; 
+                    availableStartingSlots.push({
+                        id: treatmentStartingSlot.id, // ID of the second slot (treatment start)
+                        start_time: treatmentStartingSlot.start_time,
+                        end_time: treatmentStartingSlot.end_time, // May need to adjust if UI expects overall end time
+                        // Add any other relevant fields for the UI if necessary
+                    });
                 }
             }
-            
-            if (blockIsValid) {
-                // This block meets the pattern
-                const startingSlot = potentialBlock[0];
-                availableStartingSlots.push({
-                    id: startingSlot.id,
-                    start_time: startingSlot.start_time,
-                    end_time: startingSlot.end_time,
-                });
+        } else {
+            // --- Existing Lounge Service Availability Logic ---
+            // Ensure attendees is present for lounge service before proceeding
+            if (!attendees || attendees.length === 0) {
+                // This case should ideally be caught by Zod, but as a safeguard:
+                return NextResponse.json({ error: 'Attendees are required for lounge service availability.' }, { status: 400 });
+            }
+
+            // --- Fetch Treatment Durations (only needed for lounge) --- 
+            const uniqueTreatmentIds = Array.from(new Set(attendees.map((a: z.infer<typeof attendeeAvailabilitySchema>) => 
+                typeof a.treatmentId === 'string' ? parseInt(a.treatmentId, 10) : a.treatmentId
+            )));
+
+            if (uniqueTreatmentIds.some(id => isNaN(id as number))) { 
+                return NextResponse.json({ error: 'Invalid Treatment ID found.' }, { status: 400 });
+            }
+
+            const { data: treatmentDurations, error: durationError } = await supabase
+                .from('treatments')
+                .select('id, duration_minutes_200ml, duration_minutes_1000ml')
+                .in('id', uniqueTreatmentIds);
+
+            if (durationError) {
+                console.error('Supabase error fetching treatment durations:', durationError);
+                throw durationError;
+            }
+            if (!treatmentDurations || treatmentDurations.length !== uniqueTreatmentIds.length) {
+                 console.warn('Could not fetch duration info for all requested treatments.');
+                 return NextResponse.json({ error: 'Could not find duration details for all selected treatments.' }, { status: 404 });
+            }
+
+            const durationMap = new Map<string | number, TreatmentDurationInfo>();
+            treatmentDurations.forEach(t => durationMap.set(t.id, t));
+
+            const { required_span, demand } = calculateBookingPattern(attendees, durationMap, 2); // Assuming capacity 2
+
+            for (let i = 0; i <= allTimeSlots.length - required_span; i++) {
+                const potentialBlock = allTimeSlots.slice(i, i + required_span);
+                let blockIsValid = true;
+                
+                for (let j = 0; j < required_span; j++) {
+                    const slot = potentialBlock[j];
+                    const requiredSeats = demand[j] || 0;
+                    const availableSeats = slot.capacity - slot.booked_count;
+                    
+                    if (availableSeats < requiredSeats) {
+                        blockIsValid = false;
+                        break;
+                    }
+                }
+                
+                if (blockIsValid) {
+                    const startingSlot = potentialBlock[0];
+                    availableStartingSlots.push({
+                        id: startingSlot.id,
+                        start_time: startingSlot.start_time,
+                        end_time: startingSlot.end_time,
+                    });
+                }
             }
         }
 

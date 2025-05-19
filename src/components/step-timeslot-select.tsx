@@ -13,27 +13,39 @@ import {
     PopoverContent,
     PopoverTrigger,
 } from "@/components/ui/popover"; // Import Popover components
-import { BookingFormData, AttendeeData } from './booking-form'; // Import AttendeeData
+import { BookingFormData } from './booking-form'; // Import AttendeeData
 import { useFormContext } from 'react-hook-form'; // Import
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
 // ADD TimeSlot interface definition here
 interface TimeSlot {
-    id: number;
-    location_id: string;
-    start_time: string; // ISO 8601 format
-    end_time: string;   // ISO 8601 format
-    is_available: boolean;
-    capacity: number;
-    current_bookings: number;
+    id: number; // For lounge, this is the slot ID. For mobile, it's the ID of the *second* slot.
+    location_id?: string; // Only relevant for lounge
+    start_time: string; // ISO 8601 format. For mobile, this is the actual treatment start time (2nd slot)
+    end_time: string;   // ISO 8601 format. For mobile, this is the end time of the actual treatment slot (2nd slot)
+    is_available?: boolean; // Only relevant for lounge
+    capacity?: number; // Only relevant for lounge
+    current_bookings?: number; // Only relevant for lounge
 }
 
 // --- NEW: Type for the data sent to availability API ---
-interface AvailabilityRequestData {
-    locationId: string;
+interface AvailabilityRequestDataBase {
     date: string;
-    attendees: Pick<AttendeeData, 'treatmentId' | 'fluidOption'>[]; // Only need these fields
+    destinationType: 'lounge' | 'mobile';
 }
+
+interface LoungeAvailabilityRequestData extends AvailabilityRequestDataBase {
+    destinationType: 'lounge';
+    locationId: string;
+    attendees: Pick<BookingFormData['attendees'][number], 'treatmentId' | 'fluidOption' | 'addOnTreatmentId'>[];
+}
+
+interface MobileAvailabilityRequestData extends AvailabilityRequestDataBase {
+    destinationType: 'mobile';
+    locationId: string; // This will be the dispatchLoungeId
+}
+
+type AvailabilityRequestData = LoungeAvailabilityRequestData | MobileAvailabilityRequestData;
 
 interface StepTimeslotSelectProps {
     // formData: BookingFormData;
@@ -43,8 +55,8 @@ interface StepTimeslotSelectProps {
 export default function StepTimeslotSelect(/* { formData, updateFormData }: StepTimeslotSelectProps */) {
     const form = useFormContext<BookingFormData>(); // Use context
 
-    // Get necessary values from form context
-    const locationId = form.watch('loungeLocationId');
+    const destinationType = form.watch('destinationType');
+    const loungeLocationId = form.watch('loungeLocationId'); // Used as locationId for lounge, and dispatchLoungeId for mobile
     const selectedDate = form.watch('selectedDate');
     const selectedTimeSlotId = form.watch('selectedTimeSlotId');
     const attendeeCount = form.watch('attendeeCount'); // Get attendee count
@@ -57,30 +69,44 @@ export default function StepTimeslotSelect(/* { formData, updateFormData }: Step
     const attendeesDetails = form.watch('attendees') || []; // Use the attendee details array
 
     useEffect(() => {
-        // Ensure all necessary data including attendee details are present
-        const canFetch = selectedDate && locationId && attendeeCount && 
-                       attendeesDetails.length === attendeeCount && // Make sure array matches count
-                       attendeesDetails.every(a => a && (a.addOnTreatmentId || a.fluidOption)); // Require either add-on OR fluid option
+        let canFetch = false;
+        let requestBody: AvailabilityRequestData | null = null;
+        const dateString = selectedDate ? format(selectedDate, 'yyyy-MM-dd') : null;
 
-        if (canFetch) {
+        if (dateString && loungeLocationId) {
+            if (destinationType === 'lounge') {
+                canFetch = attendeeCount > 0 && 
+                           attendeesDetails.length === attendeeCount && 
+                           attendeesDetails.every(a => a && (a.treatmentId && a.fluidOption)); // For lounge, treatment & fluid are needed for duration calculation
+                if (canFetch) {
+                    requestBody = {
+                        destinationType: 'lounge',
+                        locationId: loungeLocationId,
+                        date: dateString,
+                        attendees: attendeesDetails.map(a => ({
+                            treatmentId: a?.treatmentId,
+                            fluidOption: a?.fluidOption,
+                            addOnTreatmentId: a?.addOnTreatmentId
+                        }))
+                    };
+                }
+            } else if (destinationType === 'mobile') {
+                canFetch = true; // For mobile, only date and dispatch lounge are needed
+                requestBody = {
+                    destinationType: 'mobile',
+                    locationId: loungeLocationId, // This is the dispatchLoungeId
+                    date: dateString,
+                };
+            }
+        }
+
+        if (canFetch && requestBody) {
             setIsLoading(true);
             setError(null);
-            const dateString = format(selectedDate, 'yyyy-MM-dd');
-            
-            // --- Revert to POST request --- 
-            const requestBody = {
-                locationId: locationId,
-                date: dateString,
-                attendeeCount: attendeeCount,
-                // Add the attendees array with necessary fields
-                attendees: attendeesDetails.map(a => ({
-                    treatmentId: a?.treatmentId, 
-                    fluidOption: a?.fluidOption, 
-                    addOnTreatmentId: a?.addOnTreatmentId 
-                }))
-            };
 
-            fetch('/api/availability', { // Use POST
+            console.log('Client is sending this requestBody to /api/availability:', JSON.parse(JSON.stringify(requestBody))); // Deep clone for inspection
+
+            fetch('/api/availability', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -100,40 +126,29 @@ export default function StepTimeslotSelect(/* { formData, updateFormData }: Step
                 .catch(err => {
                     console.error("Availability fetch error:", err);
                     setError(err.message || 'Could not load time slots.');
-                    setAvailableSlots([]); // Clear slots on error
+                    setAvailableSlots([]);
                     setIsLoading(false);
                 });
         } else {
-            setAvailableSlots([]); // Clear slots if date/location/attendeeCount not set
+            setAvailableSlots([]);
         }
-    }, [selectedDate, locationId, attendeeCount, attendeesDetails]); // Add attendeesDetails dependency
+    }, [selectedDate, loungeLocationId, destinationType, attendeeCount, attendeesDetails]); // form.watch removed
 
     const handleDateSelect = (date: Date | undefined) => {
         if (date) {
             form.setValue('selectedDate', date, { shouldValidate: true });
-            // Reset selected time slot when date changes
             form.setValue('selectedTimeSlotId', undefined, { shouldValidate: true });
             form.setValue('selectedStartTime', undefined, { shouldValidate: true });
-            // updateFormData({ selectedDate: date, selectedTimeSlotId: undefined, selectedStartTime: undefined });
         }
     };
 
     const handleSlotSelect = (slotId: string | number) => {
-        console.log('*** handleSlotSelect called for slot:', slotId);
-        // Find the full slot object from the availableSlots array
         const selectedSlot = availableSlots.find(slot => String(slot.id) === String(slotId));
         if (selectedSlot) {
             form.setValue('selectedTimeSlotId', String(selectedSlot.id), { shouldValidate: true });
             form.setValue('selectedStartTime', selectedSlot.start_time, { shouldValidate: true });
-            // Trigger validation specifically for selectedStartTime after setting it
             form.trigger('selectedStartTime');
-            // updateFormData({
-            //     selectedTimeSlotId: String(selectedSlot.id),
-            //     selectedStartTime: selectedSlot.start_time // Store the start time string
-            // });
         } else {
-            console.error("Selected slot not found in available slots list");
-            // Optionally handle this error case, e.g., clear selection or show message
             form.setValue('selectedTimeSlotId', undefined, { shouldValidate: true });
             form.setValue('selectedStartTime', undefined, { shouldValidate: true });
         }
@@ -150,12 +165,22 @@ export default function StepTimeslotSelect(/* { formData, updateFormData }: Step
         }
     };
 
-    // --- Check if prerequisite data is available --- 
-    const prerequisiteMissing = !locationId || attendeesDetails.length === 0 || attendeesDetails.some(a => !a.treatmentId || !a.fluidOption);
+    const getPrerequisiteMissingMessage = () => {
+        if (!loungeLocationId) {
+            return destinationType === 'lounge' ? "Please select a lounge location in the previous step." : "Please select a dispatch lounge in the previous step.";
+        }
+        if (destinationType === 'lounge' && (attendeesDetails.length === 0 || attendeesDetails.some(a => !a.treatmentId || !a.fluidOption))) {
+            return "Please ensure all attendee treatment and fluid details are selected in previous steps.";
+        }
+        return null;
+    };
 
-    if (form.watch('destinationType') !== 'lounge') {
-        // This case should ideally not be reached due to form flow logic
-        return null; 
+    const prerequisiteMissingMessage = getPrerequisiteMissingMessage();
+    
+    // This step should only render if a destinationType is selected.
+    // The booking form logic should handle showing the correct step (lounge/mobile details) before this one.
+    if (!destinationType) {
+      return <p className="text-sm text-orange-600">Please select a destination type in Step 1.</p>;
     }
 
     return (
@@ -171,8 +196,10 @@ export default function StepTimeslotSelect(/* { formData, updateFormData }: Step
                             variant={"outline"}
                             className={cn(
                                 "w-full justify-start text-left font-normal",
-                                !selectedDate && "text-muted-foreground"
+                                !selectedDate && "text-muted-foreground",
+                                !!prerequisiteMissingMessage && "opacity-50 cursor-not-allowed"
                             )}
+                            disabled={!!prerequisiteMissingMessage} // Disable if prerequisites are missing
                         >
                             <CalendarIcon className="mr-2 h-4 w-4" />
                             {selectedDate ? format(selectedDate, "PPP") : <span>Pick a date</span>}
@@ -188,36 +215,37 @@ export default function StepTimeslotSelect(/* { formData, updateFormData }: Step
                         />
                     </PopoverContent>
                 </Popover>
-                {!selectedDate && <p className="text-sm text-red-600 mt-1">Choose a date.</p>}
-                {error && !selectedDate && <p className="text-sm text-red-600 mt-1">{error}</p>}
+                {!selectedDate && !prerequisiteMissingMessage && <p className="text-sm text-red-600 mt-1">Choose a date.</p>}
             </div>
 
             {/* Time Slot Selection */}
-            {prerequisiteMissing && (
-                 <p className="text-sm text-orange-600">Please ensure location and all attendee treatment/fluid details are selected in previous steps.</p>
+            {prerequisiteMissingMessage && (
+                 <p className="text-sm text-orange-600">{prerequisiteMissingMessage}</p>
             )}
 
-            {!prerequisiteMissing && selectedDate && (
+            {!prerequisiteMissingMessage && selectedDate && (
                 <div className="space-y-3">
                     <Label>Select an Available Time Slot for {format(selectedDate, 'PPP')}</Label>
                     {isLoading && <p>Loading slots...</p>}
-                    {error && <p className="text-red-500">Error: {error}</p>}
+                    {error && <Alert variant="destructive"><AlertTitle>Error</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
                     {!isLoading && !error && availableSlots.length === 0 && (
-                        <p className="text-gray-600">No available slots found matching the required duration and capacity for all attendees on this date.</p> // Updated message
+                        <p className="text-gray-600">
+                            {destinationType === 'mobile' 
+                                ? "No available 2-hour blocks (including travel time) found for the selected dispatch lounge and date."
+                                : "No available slots found matching the required duration and capacity for all attendees on this date."}
+                        </p>
                     )}
                     {!isLoading && !error && availableSlots.length > 0 && (
                         <div className="grid grid-cols-3 gap-3">
                             {availableSlots
                                 .map((slot) => (
                                     <Button
-                                        key={slot.id}
+                                        key={slot.id} // For mobile, this ID is unique for the displayable slot
                                         variant={String(slot.id) === selectedTimeSlotId ? "default" : "outline"}
                                         onClick={() => handleSlotSelect(slot.id)}
                                         type="button"
                                     >
-                                        {formatTime(slot.start_time)}
-                                        {/* Removed seat count as it's no longer reliable/provided */}
-                                        {/* <span className="text-xs">({slot.remaining_seats} seat{slot.remaining_seats !== 1 ? 's' : ''} left)</span> */}
+                                        {formatTime(slot.start_time)} {/* For mobile, this is already the treatment time */}
                                     </Button>
                                 ))
                             }
@@ -227,9 +255,9 @@ export default function StepTimeslotSelect(/* { formData, updateFormData }: Step
             )}
 
             {/* Display message if no date/slot selected */}
-            {!prerequisiteMissing && !selectedDate && <p className="text-sm text-gray-600">Please select a date.</p>}
-            {!prerequisiteMissing && selectedDate && !selectedTimeSlotId && !isLoading && availableSlots.length > 0 && (
-                <p className="text-sm text-gray-600">Please select an available time slot.</p>
+            {!prerequisiteMissingMessage && !selectedDate && <p className="text-sm text-gray-600">Please select a date first.</p>}
+            {!prerequisiteMissingMessage && selectedDate && !selectedTimeSlotId && !isLoading && availableSlots.length > 0 && (
+                <p className="text-sm text-red-600 mt-1">Please select an available time slot.</p>
             )}
         </div>
     );

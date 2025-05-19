@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { BookingFormData, AttendeeData } from './booking-form';
+import { BookingFormData, bookingFormSchema } from './booking-form';
 import { Label } from '@/components/ui/label';
 import { Input } from "@/components/ui/input";
 import {
@@ -213,7 +213,6 @@ export default function StepAttendeeDetails({
                             value={field.value ? String(field.value) : ''} 
                             onValueChange={(value) => { 
                               field.onChange(value); 
-                              form.setValue(`attendees.${index}.fluidOption`, undefined, { shouldValidate: true }); 
                             }}
                             required
                           >

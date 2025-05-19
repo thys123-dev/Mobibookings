@@ -4,7 +4,7 @@ import React, { useMemo } from 'react';
 import { format, parseISO, isValid } from 'date-fns';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import { BookingFormData, AttendeeData } from './booking-form';
+import { BookingFormData } from './booking-form';
 import { LOUNGE_LOCATIONS } from '@/lib/constants';
 
 // Reuse the Treatment interface (ideally imported from types.ts)
@@ -43,6 +43,7 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
         loungeLocationId,
         selectedDate,
         selectedStartTime,
+        clientAddress,
         email,
         phone,
         attendees
@@ -147,6 +148,21 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
                                 <span>{selectedTimeDisplay}</span>
                             </>
                         )}
+                        {destinationType === 'mobile' && (
+                            <>
+                                <Label>Dispatch Lounge:</Label>
+                                <span>{selectedLocationName || 'N/A'}</span>
+
+                                <Label>Treatment Address:</Label>
+                                <span>{clientAddress || 'N/A'}</span>
+
+                                <Label>Date:</Label>
+                                <span>{formattedDate}</span>
+
+                                <Label>Treatment Time:</Label>
+                                <span>{selectedTimeDisplay}</span>
+                            </>
+                        )}
                     </div>
 
                     <hr />
@@ -209,7 +225,7 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
                             }
                             
                             // Format fluid option text
-                            let fluidText = attendee.fluidOption || 'N/A';
+                            let fluidText: string = attendee.fluidOption || 'N/A';
                             if (attendee.fluidOption === '1000ml_dextrose') {
                                 fluidText = '1000ml + Dextrose';
                             }
