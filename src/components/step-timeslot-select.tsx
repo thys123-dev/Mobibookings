@@ -78,17 +78,17 @@ export default function StepTimeslotSelect(/* { formData, updateFormData }: Step
                 canFetch = attendeeCount > 0 && 
                            attendeesDetails.length === attendeeCount && 
                            attendeesDetails.every(a => a && (a.treatmentId && a.fluidOption)); // For lounge, treatment & fluid are needed for duration calculation
-                if (canFetch) {
+        if (canFetch) {
                     requestBody = {
                         destinationType: 'lounge',
                         locationId: loungeLocationId,
-                        date: dateString,
-                        attendees: attendeesDetails.map(a => ({
-                            treatmentId: a?.treatmentId,
-                            fluidOption: a?.fluidOption,
-                            addOnTreatmentId: a?.addOnTreatmentId
-                        }))
-                    };
+                date: dateString,
+                attendees: attendeesDetails.map(a => ({
+                    treatmentId: a?.treatmentId, 
+                    fluidOption: a?.fluidOption, 
+                    addOnTreatmentId: a?.addOnTreatmentId 
+                }))
+            };
                 }
             } else if (destinationType === 'mobile') {
                 canFetch = true; // For mobile, only date and dispatch lounge are needed
@@ -139,6 +139,7 @@ export default function StepTimeslotSelect(/* { formData, updateFormData }: Step
             form.setValue('selectedDate', date, { shouldValidate: true });
             form.setValue('selectedTimeSlotId', undefined, { shouldValidate: true });
             form.setValue('selectedStartTime', undefined, { shouldValidate: true });
+            setIsPopoverOpen(false);
         }
     };
 

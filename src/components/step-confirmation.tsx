@@ -231,7 +231,7 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
                             }
 
                             return (
-                                <div key={index} className="p-3 border rounded-md bg-muted/30 space-y-2">
+                                <div key={index} className="p-3 border border-gray-300 rounded-md bg-muted/30 space-y-2">
                                      <h4 className="font-medium">Attendee {index + 1}: {attendee.firstName || 'N/A'} {attendee.lastName || 'N/A'}</h4>
                                      <div className="grid grid-cols-[auto_1fr] gap-x-2 text-sm">
                                          {/* Display Email and Phone per attendee - MOVED UP */}

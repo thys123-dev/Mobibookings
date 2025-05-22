@@ -6,6 +6,7 @@ import { z } from 'zod'; // Import Zod
 const attendeeAvailabilitySchema = z.object({
     treatmentId: z.union([z.number(), z.string()]), // Allow number or string ID
     fluidOption: z.enum(['200ml', '1000ml', '1000ml_dextrose']),
+    addOnTreatmentId: z.union([z.string(), z.number()]).nullable().optional(), // Added to match client data and rule logic
     // We don't need name/email/phone here, just treatment/fluid
 });
 
@@ -206,32 +207,69 @@ export async function POST(request: NextRequest) { // Ensure 'request' is used
                 throw durationError;
             }
             if (!treatmentDurations || treatmentDurations.length !== uniqueTreatmentIds.length) {
-                 console.warn('Could not fetch duration info for all requested treatments.');
-                 return NextResponse.json({ error: 'Could not find duration details for all selected treatments.' }, { status: 404 });
+                console.warn('Could not fetch duration info for all requested treatments.');
+                return NextResponse.json({ error: 'Could not find duration details for all selected treatments.' }, { status: 404 });
             }
 
             const durationMap = new Map<string | number, TreatmentDurationInfo>();
             treatmentDurations.forEach(t => durationMap.set(t.id, t));
 
-            const { required_span, demand } = calculateBookingPattern(attendees, durationMap, 2); // Assuming capacity 2
+            // --- NEW: Accurate group booking logic for mixed durations ---
+            // 1. For each possible starting slot, simulate each attendee's required slots
+            // 2. For each slot, sum the number of attendees present
+            // 3. Only mark as available if all slots in the block have enough available seats
 
-            for (let i = 0; i <= allTimeSlots.length - required_span; i++) {
-                const potentialBlock = allTimeSlots.slice(i, i + required_span);
+            const slotLengthMinutes = 30;
+            const slotCount = allTimeSlots.length;
+            const attendeeSlotSpans = attendees.map(attendee => {
+                // Apply business rule: if add-on exists, duration is 90 minutes (3 slots)
+                if (attendee.addOnTreatmentId && String(attendee.addOnTreatmentId).trim() !== '' && String(attendee.addOnTreatmentId).toLowerCase() !== 'none') {
+                    return 3; // 90 minutes = 3 slots
+                }
+                // Otherwise, calculate based on base treatment and fluid option
+                const lookupId = typeof attendee.treatmentId === 'string' ? parseInt(attendee.treatmentId, 10) : attendee.treatmentId;
+                const durationInfo = durationMap.get(lookupId);
+                if (!durationInfo) throw new Error(`Duration info missing for treatment ID ${lookupId} (attendee: ${JSON.stringify(attendee)})`);
+                const duration = attendee.fluidOption === '200ml' ? durationInfo.duration_minutes_200ml : durationInfo.duration_minutes_1000ml;
+                return Math.ceil(duration / slotLengthMinutes);
+            });
+            const maxSpan = Math.max(...attendeeSlotSpans);
+
+            for (let i = 0; i <= slotCount - maxSpan; i++) { // i is the potential starting index in allTimeSlots
                 let blockIsValid = true;
-                
-                for (let j = 0; j < required_span; j++) {
-                    const slot = potentialBlock[j];
-                    const requiredSeats = demand[j] || 0;
-                    const availableSeats = slot.capacity - slot.booked_count;
+
+                // For each slot within the 'maxSpan' starting from 'i',
+                // check if the total demand from the current group can be met.
+                for (let j = 0; j < maxSpan; j++) {
+                    const currentSlotIndexInDay = i + j; // The actual index in allTimeSlots
+                    const actualSlot = allTimeSlots[currentSlotIndexInDay];
                     
-                    if (availableSeats < requiredSeats) {
+                    if (!actualSlot) { // Should not happen if loop bounds are correct
+                        blockIsValid = false;
+                        break;
+                    }
+
+                    const availableSeats = actualSlot.capacity - actualSlot.booked_count;
+                    
+                    // Calculate how many attendees from the CURRENT GROUP need THIS specific slot (currentSlotIndexInDay)
+                    let demandForThisSlotByGroup = 0;
+                    for (let a = 0; a < attendees.length; a++) {
+                        const attendeeNeeds_N_Slots = attendeeSlotSpans[a];
+                        // Does attendee 'a' occupy 'currentSlotIndexInDay'?
+                        // Yes, if currentSlotIndexInDay is between i and i + attendeeNeeds_N_Slots - 1
+                        if (currentSlotIndexInDay < (i + attendeeNeeds_N_Slots) ) {
+                            demandForThisSlotByGroup++;
+                        }
+                    }
+
+                    if (demandForThisSlotByGroup > availableSeats) {
                         blockIsValid = false;
                         break;
                     }
                 }
-                
+
                 if (blockIsValid) {
-                    const startingSlot = potentialBlock[0];
+                    const startingSlot = allTimeSlots[i];
                     availableStartingSlots.push({
                         id: startingSlot.id,
                         start_time: startingSlot.start_time,

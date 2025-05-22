@@ -84,7 +84,7 @@ export default function StepDestination(/* { formData, updateFormData }: StepDes
                     onChange={handleAttendeeCountChange}
                     min="1"
                     required
-                    className="mt-1"
+                    className="mt-1 border-gray-400"
                 />
             </div>
 

@@ -1,6 +1,8 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
+import PhoneInput, { isValidPhoneNumber } from 'react-phone-number-input';
+import 'react-phone-number-input/style.css';
 import { BookingFormData, bookingFormSchema } from './booking-form';
 import { Label } from '@/components/ui/label';
 import { Input } from "@/components/ui/input";
@@ -19,8 +21,26 @@ import {
   FormField,
   FormItem,
   FormLabel,
+  FormMessage,
 } from "@/components/ui/form";
 import { useFormContext } from 'react-hook-form';
+
+// Custom input component for PhoneInput to control internal styling
+const CustomPhoneNumberInput = React.forwardRef<
+  HTMLInputElement,
+  React.InputHTMLAttributes<HTMLInputElement>
+>((props, ref) => {
+  // props.className from react-phone-number-input will include 'PhoneInputInput'
+  // which has base styles like height: 100%, background: transparent, border: 0, outline: 0.
+  // We are adding vertical padding and ensuring text size and placeholder color.
+  return (
+    <input
+      {...props}
+      ref={ref}
+      className={`${props.className || ''} py-2 text-sm placeholder:text-muted-foreground`}
+    />
+  );
+});
 
 // Reuse the Treatment interface (ideally imported from types.ts)
 interface Treatment {
@@ -153,57 +173,77 @@ export default function StepAttendeeDetails({
           // --- END Calculation ---
 
           return (
-              <div key={index} className="p-4 border rounded-md space-y-4 mt-4">
+              <div key={index} className="p-4 border border-gray-300 rounded-md space-y-4 mt-4">
                   <h3 className="text-lg font-medium">Attendee {index + 1}</h3>
                   {/* Name Inputs */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-                      <Label htmlFor={`attendee-${index}-firstName`}>First Name</Label>
-              <Input
-                        id={`attendee-${index}-firstName`}
-                        {...form.register(`attendees.${index}.firstName`)}
-                  required
-                  className="mt-1"
-              />
-          </div>
-          <div>
-                      <Label htmlFor={`attendee-${index}-lastName`}>Last Name</Label>
-              <Input
-                        id={`attendee-${index}-lastName`}
-                        {...form.register(`attendees.${index}.lastName`)}
-                  required
-                  className="mt-1"
-              />
-          </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <FormField
+                          control={form.control}
+                          name={`attendees.${index}.firstName`}
+                          render={({ field }) => (
+                              <FormItem>
+                                  <FormLabel className="!text-black">First Name</FormLabel>
+                                  <FormControl>
+                                      <Input {...field} required className="mt-1 !border-black" />
+                                  </FormControl>
+                              </FormItem>
+                          )}
+                      />
+                      <FormField
+                          control={form.control}
+                          name={`attendees.${index}.lastName`}
+                          render={({ field }) => (
+                              <FormItem>
+                                  <FormLabel className="!text-black">Last Name</FormLabel>
+                                  <FormControl>
+                                      <Input {...field} required className="mt-1 !border-black" />
+                                  </FormControl>
+                              </FormItem>
+                          )}
+                      />
                   </div>
 
-                  {/* ADDED: Email and Phone Inputs */}
+                  {/* Email and Phone Inputs */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-                      <Label htmlFor={`attendee-${index}-email`}>Email</Label>
-              <Input
-                        id={`attendee-${index}-email`}
-                        {...form.register(`attendees.${index}.email`)}
-                  type="email"
-                  required
-                  className="mt-1"
-              />
-          </div>
-          <div>
-                      <Label htmlFor={`attendee-${index}-phone`}>Phone Number</Label>
-              <Input
-                        id={`attendee-${index}-phone`}
-                        {...form.register(`attendees.${index}.phone`)}
-                        type="tel" // Use type="tel" for better mobile experience
-                  required
-                  className="mt-1"
-              />
-          </div>
-      </div>
+                      <FormField
+                          control={form.control}
+                          name={`attendees.${index}.email`}
+                          render={({ field }) => (
+                              <FormItem>
+                                  <FormLabel className="!text-black">Email</FormLabel>
+                                  <FormControl>
+                                      <Input type="email" {...field} required className="mt-1 !border-black" />
+                                  </FormControl>
+                                  <FormMessage />
+                              </FormItem>
+                          )}
+                      />
+                      <FormField
+                          control={form.control}
+                          name={`attendees.${index}.phone`}
+                          render={({ field }) => (
+                              <FormItem>
+                                  <FormLabel className="!text-black">Phone Number</FormLabel>
+                                  <FormControl>
+                                      <PhoneInput
+                                          international
+                                          defaultCountry="ZA"
+                                          placeholder="Enter phone number"
+                                          value={field.value}
+                                          onChange={field.onChange}
+                                          inputComponent={CustomPhoneNumberInput}
+                                          className="mt-1 flex h-10 w-full items-center rounded-md border !border-black bg-background px-3 text-sm"
+                                      />
+                                  </FormControl>
+                                  <FormMessage />
+                              </FormItem>
+                          )}
+                      />
+                  </div>
 
                   {/* Treatment Selection */}
                   <div>
-                    <Label htmlFor={`attendee-${index}-treatment`}>IV Treatment</Label>
+                    <Label htmlFor={`attendee-${index}-treatment`} className="!text-black">IV Treatment</Label>
                     <FormField
                       control={form.control}
                       name={`attendees.${index}.treatmentId`}
@@ -217,7 +257,7 @@ export default function StepAttendeeDetails({
                             required
                           >
                             <FormControl>
-                              <SelectTrigger id={`attendee-${index}-treatment`}>
+                              <SelectTrigger id={`attendee-${index}-treatment`} className="!border-black">
                                 <SelectValue placeholder="Select a treatment..." />
                               </SelectTrigger>
                             </FormControl>
@@ -231,6 +271,7 @@ export default function StepAttendeeDetails({
                               ))}
                             </SelectContent>
                           </Select>
+                          <FormMessage className="!text-black" />
                         </FormItem>
                       )}
                     />
@@ -243,7 +284,7 @@ export default function StepAttendeeDetails({
                       name={`attendees.${index}.fluidOption`}
                       render={({ field }) => (
                         <FormItem className="pt-2">
-                          <Label className="mb-2 block">IV Fluid Bag Size</Label>
+                          <Label className="mb-2 block !text-black">IV Fluid Bag Size</Label>
                           <FormControl>
                             <RadioGroup 
                               onValueChange={field.onChange}
@@ -251,32 +292,30 @@ export default function StepAttendeeDetails({
                               className="grid grid-cols-1 sm:grid-cols-3 gap-4"
                               required
                             > 
-                              {/* Option 1: 200ml */}
-                              <div className="flex items-start space-x-3 p-3 border rounded-md bg-muted/30">
-                                <RadioGroupItem value="200ml" id={`attendee-${index}-fluid-200`} className="mt-1" />
-                                <Label htmlFor={`attendee-${index}-fluid-200`} className="cursor-pointer font-normal">
+                              <div className="flex items-start space-x-3 p-3 border !border-black rounded-md bg-muted/60">
+                                <RadioGroupItem value="200ml" id={`attendee-${index}-fluid-200`} className="mt-1 !border-black" />
+                                <Label htmlFor={`attendee-${index}-fluid-200`} className="cursor-pointer font-normal !text-black">
                                   <span className="block font-medium">200ml IV</span>
                                   <span className="block text-xs text-muted-foreground">Moderate rehydration. No extra cost.</span>
                                 </Label>
                               </div>
-                              {/* Option 2: 1000ml */}
-                              <div className="flex items-start space-x-3 p-3 border rounded-md bg-muted/30">
-                                <RadioGroupItem value="1000ml" id={`attendee-${index}-fluid-1000`} className="mt-1" />
-                                <Label htmlFor={`attendee-${index}-fluid-1000`} className="cursor-pointer font-normal">
+                              <div className="flex items-start space-x-3 p-3 border !border-black rounded-md bg-muted/60">
+                                <RadioGroupItem value="1000ml" id={`attendee-${index}-fluid-1000`} className="mt-1 !border-black" />
+                                <Label htmlFor={`attendee-${index}-fluid-1000`} className="cursor-pointer font-normal !text-black">
                                   <span className="block font-medium">1000ml IV</span>
                                   <span className="block text-xs text-muted-foreground">Super rehydration. No extra cost.</span>
                                 </Label>
                               </div>
-                              {/* Option 3: 1000ml + Dextrose */}
-                              <div className="flex items-start space-x-3 p-3 border rounded-md bg-muted/30">
-                                <RadioGroupItem value="1000ml_dextrose" id={`attendee-${index}-fluid-1000d`} className="mt-1" />
-                                <Label htmlFor={`attendee-${index}-fluid-1000d`} className="cursor-pointer font-normal">
+                              <div className="flex items-start space-x-3 p-3 border !border-black rounded-md bg-muted/60">
+                                <RadioGroupItem value="1000ml_dextrose" id={`attendee-${index}-fluid-1000d`} className="mt-1 !border-black" />
+                                <Label htmlFor={`attendee-${index}-fluid-1000d`} className="cursor-pointer font-normal !text-black">
                                   <span className="block font-medium">1000ml IV + Dextrose</span>
                                   <span className="block text-xs text-muted-foreground">Additional R{DEXTROSE_EXTRA_COST.toFixed(0)}.</span>
                                 </Label>
                               </div>
                             </RadioGroup>
                           </FormControl>
+                          <FormMessage className="!text-black" />
                         </FormItem>
                       )}
                     />
@@ -288,13 +327,13 @@ export default function StepAttendeeDetails({
                     name={`attendees.${index}.addOnTreatmentId`}
                     render={({ field }) => (
                       <FormItem className="mb-4">
-                        <Label>Optional Add-on Treatment</Label>
+                        <Label className="!text-black">Optional Add-on Treatment</Label>
                         <FormControl>
                           <Select
                             value={field.value ? String(field.value) : "none"} 
                             onValueChange={(value) => field.onChange(value === "none" ? null : value)}
                           >
-                            <SelectTrigger>
+                            <SelectTrigger className="!border-black">
                               <SelectValue placeholder="Select add-on (optional)" />
                             </SelectTrigger>
                             <SelectContent>
@@ -307,6 +346,7 @@ export default function StepAttendeeDetails({
                             </SelectContent>
                           </Select>
                         </FormControl>
+                        <FormMessage className="!text-black" />
                       </FormItem>
                     )}
                   />
@@ -317,13 +357,13 @@ export default function StepAttendeeDetails({
                     name={`attendees.${index}.additionalVitaminId`}
                     render={({ field }) => (
                       <FormItem className="mb-4">
-                        <Label>Additional Vitamins (Optional)</Label>
+                        <Label className="!text-black">Additional Vitamins (Optional)</Label>
                         <FormControl>
                           <Select
                             value={field.value ? String(field.value) : "none"}
                             onValueChange={(value) => field.onChange(value === "none" ? null : value)}
                           >
-                            <SelectTrigger>
+                            <SelectTrigger className="!border-black">
                               <SelectValue placeholder="Select vitamin (optional)" />
                             </SelectTrigger>
                             <SelectContent>
@@ -337,13 +377,14 @@ export default function StepAttendeeDetails({
                             </SelectContent>
                           </Select>
                         </FormControl>
+                        <FormMessage className="!text-black" />
                       </FormItem>
                     )}
                   />
 
                   {/* Display Price/Duration - Now AFTER Add-on selection */}
                   {(selectedTreatment) && ( // Only show if base treatment is selected
-                    <div className="p-2 border rounded-md bg-muted/50 text-sm mt-2">
+                    <div className="p-2 border border-gray-300 rounded-md bg-muted/50 text-sm mt-2">
                       <p><strong>Price:</strong> {displayPrice !== undefined ? `R ${displayPrice.toFixed(0)}` : 'N/A'}</p>
                       <p><strong>Duration:</strong> {displayDuration !== undefined ? `${displayDuration} minutes` : 'N/A'}</p>
                     </div>

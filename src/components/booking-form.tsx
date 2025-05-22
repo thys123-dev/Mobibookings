@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm, FormProvider, useWatch } from "react-hook-form";
 import { z } from "zod";
+import { isValidPhoneNumber } from 'react-phone-number-input';
 
 import { Button } from '@/components/ui/button';
 import StepDestination from './step-destination';
@@ -13,6 +14,7 @@ import StepLoungeSelect from './step-lounge-select';
 import StepTimeslotSelect from './step-timeslot-select';
 import StepConfirmation from './step-confirmation';
 import StepMobileDetails from './step-mobile-details';
+import BookingInProgressModal from './booking-in-progress-modal';
 
 interface Treatment {
   id: number | string;
@@ -31,8 +33,11 @@ interface Vitamin {
 const attendeeSchema = z.object({
     firstName: z.string().min(1, "First name is required"),
     lastName: z.string().min(1, "Last name is required"),
-    email: z.string().email("Valid email is required"),
-    phone: z.string().min(1, "Phone number is required"),
+    email: z.string().refine(val => val.length === 0 || z.string().email().safeParse(val).success, { message: "Valid email is required" }),
+    phone: z.string()
+      .refine(value => value.length === 0 || isValidPhoneNumber(value), {
+        message: "Invalid phone number",
+      }),
     treatmentId: z.union([z.string(), z.number()]).refine(val => val !== undefined && val !== null && String(val).length > 0, { message: "Treatment is required" }),
     fluidOption: z.enum(['200ml', '1000ml', '1000ml_dextrose'], { required_error: "Fluid option is required" }),
     addOnTreatmentId: z.union([z.string(), z.number()]).nullable().optional(),
@@ -53,13 +58,13 @@ export const bookingFormSchema = z.object({
                     });
                 }
                 if (!attendee.fluidOption) {
-                    ctx.addIssue({
-                        code: z.ZodIssueCode.custom,
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
                         message: "Fluid option is required.",
                         path: [index, 'fluidOption'],
-                    });
-                }
-            });
+        });
+    }
+});
         }),
     loungeLocationId: z.string().optional(), 
     selectedDate: z.date().optional(), 
@@ -105,7 +110,7 @@ export const bookingFormSchema = z.object({
                 message: "Client address is required for mobile service.",
                 path: ['clientAddress'],
             });
-        }
+    }
         if (!data.selectedDate) {
             ctx.addIssue({
                 code: z.ZodIssueCode.custom,
@@ -130,12 +135,13 @@ const TOTAL_STEPS = 5;
 export default function BookingForm() {
     const [currentStep, setCurrentStep] = useState(1);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [showBookingInProgressModal, setShowBookingInProgressModal] = useState(false);
     const [submissionError, setSubmissionError] = useState<string | null>(null);
     const [bookingSuccess, setBookingSuccess] = useState(false);
     const [treatmentsList, setTreatmentsList] = useState<Treatment[]>([]);
     const [isLoadingTreatments, setIsLoadingTreatments] = useState(true);
     const [treatmentError, setTreatmentError] = useState<string | null>(null);
- 
+
     const [vitaminsList, setVitaminsList] = useState<Vitamin[]>([]);
     const [isLoadingVitamins, setIsLoadingVitamins] = useState(true);
     const [vitaminError, setVitaminError] = useState<string | null>(null);
@@ -246,15 +252,15 @@ export default function BookingForm() {
             case 2:
                 fieldsToValidate = ['attendees']; 
                 break;
-            case 3: 
+            case 3:
                 if (watchedDestinationType === 'lounge') {
                     fieldsToValidate = ['loungeLocationId'];
                 } else if (watchedDestinationType === 'mobile') {
                     fieldsToValidate = ['loungeLocationId', 'clientAddress']; 
                 }
                 break;
-            case 4: 
-                fieldsToValidate = ['selectedDate', 'selectedStartTime'];
+            case 4:
+                    fieldsToValidate = ['selectedDate', 'selectedStartTime'];
                 break;
             case 5: 
                 return true;
@@ -299,7 +305,7 @@ export default function BookingForm() {
                             isLoadingVitamins={isLoadingVitamins}
                             vitaminError={vitaminError}
                        />;
-            case 3: 
+            case 3:
                 if (watchedDestinationType === 'lounge') {
                     return <StepLoungeSelect />;
                 } else if (watchedDestinationType === 'mobile') {
@@ -307,7 +313,7 @@ export default function BookingForm() {
                 }
                 return <div>Please select a destination type in Step 1.</div>;
             case 4:
-                return <StepTimeslotSelect />;
+                    return <StepTimeslotSelect />;
             case 5:
                 return <StepConfirmation
                             formData={form.getValues()} 
@@ -351,6 +357,7 @@ export default function BookingForm() {
         console.log('*** processSubmit called, data:', data);
         if (isSubmitting) return;
         setIsSubmitting(true);
+        setShowBookingInProgressModal(true);
         setSubmissionError(null);
 
         console.log("Submitting validated data:", data);
@@ -361,6 +368,7 @@ export default function BookingForm() {
                 console.error("Lounge booking missing selectedStartTime.");
                 setSubmissionError("Selected start time is missing for lounge booking.");
                 setIsSubmitting(false);
+                setShowBookingInProgressModal(false);
                 return;
             }
         }
@@ -397,13 +405,16 @@ export default function BookingForm() {
 
             console.log("Booking successful:", result);
             setBookingSuccess(true);
+            setCurrentStep(TOTAL_STEPS + 1);
             setSubmissionError(null);
 
         } catch (error: any) {
             console.error("Submission failed:", error);
             setSubmissionError(error.message || "An unexpected error occurred during submission.");
+            setBookingSuccess(false);
         } finally {
             setIsSubmitting(false);
+            setShowBookingInProgressModal(false);
         }
     };
 
@@ -463,6 +474,7 @@ export default function BookingForm() {
                     </>
                 )}
             </form>
+            <BookingInProgressModal isOpen={showBookingInProgressModal} />
         </FormProvider>
     );
 } 

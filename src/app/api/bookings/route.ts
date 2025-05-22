@@ -77,6 +77,7 @@ export async function POST(request: NextRequest) {
     let primaryPhone: string | undefined | null = null;
     // --- NEW: Helper for mobile service ---
     let isMobileService = false;
+    let travelBlockStartTime: string | undefined = undefined; // Declare travelBlockStartTime here
 
     try {
         supabaseAdmin = getSupabaseAdmin();
@@ -107,7 +108,8 @@ export async function POST(request: NextRequest) {
             // The client's selectedStartTime is the treatment start time (2nd slot)
             // We need to calculate the actual start of the 4-slot block (30 mins prior)
             const treatmentStartTime = new Date(bookingData.selectedStartTime);
-            const travelBlockStartTime = new Date(treatmentStartTime.getTime() - 30 * 60 * 1000).toISOString();
+            // Assign to the higher-scoped variable
+            travelBlockStartTime = new Date(treatmentStartTime.getTime() - 30 * 60 * 1000).toISOString(); 
             
             console.log(`Mobile service booking attempt for dispatch lounge ${bookingData.loungeLocationId} at ${bookingData.clientAddress}, treatment start ${bookingData.selectedStartTime}, travel block start ${travelBlockStartTime}`);
 
@@ -117,7 +119,7 @@ export async function POST(request: NextRequest) {
                 // This should ideally be caught by Zod schema, but an explicit check before RPC is good.
                 console.error('Primary attendee email or phone missing for mobile booking RPC call.');
                 return NextResponse.json({ error: 'Primary attendee contact details are required.' }, { status: 400 });
-            }
+        }
 
             const paramsForMobileRpc = {
                 p_dispatch_lounge_id: bookingData.loungeLocationId,
@@ -139,13 +141,13 @@ export async function POST(request: NextRequest) {
         } else {
             // ---- Existing Lounge Booking Logic ----
             ({ data: rpcResult, error: rpcError } = await supabaseAdmin.rpc(
-                'book_appointment_multi_slot',
-                {
-                    p_location_id: bookingData.loungeLocationId,
-                    p_start_time: bookingData.selectedStartTime,
-                    p_attendee_count: bookingData.attendeeCount,
-                    p_attendees_details: bookingData.attendees
-                }
+            'book_appointment_multi_slot',
+            {
+            p_location_id: bookingData.loungeLocationId,
+            p_start_time: bookingData.selectedStartTime,
+                p_attendee_count: bookingData.attendeeCount,
+                p_attendees_details: bookingData.attendees
+            }
             ));
         }
 
@@ -303,28 +305,48 @@ export async function POST(request: NextRequest) {
             const treatmentDurationMap = new Map<string | number, { name: string, duration_200: number, duration_1000: number}>();
             treatmentsDurationData.forEach(t => treatmentDurationMap.set(t.id, { name: t.name, duration_200: t.duration_minutes_200ml, duration_1000: t.duration_minutes_1000ml }));
 
-            // Fetch the start times and end times of the booked slots using the CORRECT number of slots
-            // const slotsNeeded = Math.ceil(bookingData.attendeeCount / 2.0); // OLD calculation
+            // --- MODIFIED: Conditional GCal start and end time determination ---
+            let gCalStartTime: string;
+            let gCalEndTime: string;
+
+            if (isMobileService) {
+                // For mobile service:
+                // selectedStartTime is the treatment start (2nd slot).
+                // travelBlockStartTime is the actual start of the 4-slot engagement (1st slot).
+                // actualSlotSpan is 4 (for the 2-hour total duration including travel).
+                
+                // Ensure travelBlockStartTime is defined before using it
+                if (!travelBlockStartTime) {
+                    console.error('Critical error: travelBlockStartTime is not defined for mobile service GCal event.');
+                    throw new Error('Internal server error: Missing travel start time for mobile booking calendar event.');
+                }
+                gCalStartTime = travelBlockStartTime; // Use the already calculated travelBlockStartTime
+                // Calculate end time: travelBlockStartTime + (4 slots * 30 minutes/slot)
+                gCalEndTime = new Date(new Date(travelBlockStartTime).getTime() + actualSlotSpan * 30 * 60 * 1000).toISOString();
+            } else {
+                // For lounge service (existing logic):
             const { data: bookedSlotsData, error: bookedSlotsError } = await supabaseAdmin
                 .from('time_slots')
                 .select('start_time, end_time')
                 .eq('location_id', bookingData.loungeLocationId)
                 .gte('start_time', bookingData.selectedStartTime)
                 .order('start_time', { ascending: true })
-                .limit(actualSlotSpan); // <<< CORRECTED: Use actualSlotSpan from RPC result
+                    .limit(actualSlotSpan); 
 
-            if (bookedSlotsError || !bookedSlotsData || bookedSlotsData.length < actualSlotSpan) { // Check against actualSlotSpan
+                if (bookedSlotsError || !bookedSlotsData || bookedSlotsData.length < actualSlotSpan) {
                  throw new Error(`Failed to fetch details of booked slots (required: ${actualSlotSpan}) for booking ${newBookingId}: ${bookedSlotsError?.message}`);
+                }
+                gCalStartTime = bookingData.selectedStartTime; // Correct for lounge bookings
+                gCalEndTime = bookedSlotsData[actualSlotSpan - 1].end_time; // Correct for lounge bookings
             }
-            // Ensure we use the last slot in the *actual span*
-            const endTime = bookedSlotsData[actualSlotSpan - 1].end_time; 
+            // --- End of MODIFIED GCal start and end time determination ---
 
             // --- GCal Event Details ---
             if (locationError || !locationData || !locationData.google_calendar_id) {
                 throw new Error(`Failed to fetch location details or Google Calendar ID for ${bookingData.loungeLocationId}: ${locationError?.message}`);
             }
-            if (!endTime) {
-                 throw new Error(`Missing end_time for the last booked slot`);
+            if (!gCalEndTime) { // Added check for gCalEndTime, though it should always be set by logic above
+                 throw new Error(`Missing end_time for the Google Calendar event`);
             }
             if (treatmentAndAddOnInfoMap.size !== allUniqueTreatmentAndAddOnIds.length) {
                  // Check if we found info for all requested unique treatments
@@ -412,8 +434,8 @@ export async function POST(request: NextRequest) {
 
             googleEventId = await createCalendarEvent({
                 calendarId: locationData.google_calendar_id,
-                startTime: bookingData.selectedStartTime,
-                endTime: endTime, // Use end_time fetched from DB
+                startTime: gCalStartTime, // Use the conditionally determined gCalStartTime
+                endTime: gCalEndTime,   // Use the conditionally determined gCalEndTime
                 summary: eventSummary,
                 description: eventDescription,
                 attendeeEmail: primaryEmail || bookingData.email // Use primary email, fallback to original top-level email if needed
