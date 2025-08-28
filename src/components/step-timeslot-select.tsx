@@ -75,20 +75,20 @@ export default function StepTimeslotSelect(/* { formData, updateFormData }: Step
 
         if (dateString && loungeLocationId) {
             if (destinationType === 'lounge') {
-                canFetch = attendeeCount > 0 && 
-                           attendeesDetails.length === attendeeCount && 
-                           attendeesDetails.every(a => a && (a.treatmentId && a.fluidOption)); // For lounge, treatment & fluid are needed for duration calculation
-        if (canFetch) {
+                canFetch = attendeeCount > 0 &&
+                    attendeesDetails.length === attendeeCount &&
+                    attendeesDetails.every(a => a && (a.treatmentId && a.fluidOption)); // For lounge, treatment & fluid are needed for duration calculation
+                if (canFetch) {
                     requestBody = {
                         destinationType: 'lounge',
                         locationId: loungeLocationId,
-                date: dateString,
-                attendees: attendeesDetails.map(a => ({
-                    treatmentId: a?.treatmentId, 
-                    fluidOption: a?.fluidOption, 
-                    addOnTreatmentId: a?.addOnTreatmentId 
-                }))
-            };
+                        date: dateString,
+                        attendees: attendeesDetails.map(a => ({
+                            treatmentId: a?.treatmentId,
+                            fluidOption: a?.fluidOption,
+                            addOnTreatmentId: a?.addOnTreatmentId
+                        }))
+                    };
                 }
             } else if (destinationType === 'mobile') {
                 canFetch = true; // For mobile, only date and dispatch lounge are needed
@@ -177,16 +177,16 @@ export default function StepTimeslotSelect(/* { formData, updateFormData }: Step
     };
 
     const prerequisiteMissingMessage = getPrerequisiteMissingMessage();
-    
+
     // This step should only render if a destinationType is selected.
     // The booking form logic should handle showing the correct step (lounge/mobile details) before this one.
     if (!destinationType) {
-      return <p className="text-sm text-orange-600">Please select a destination type in Step 1.</p>;
+        return <p className="text-sm text-orange-600">Please select a destination type in Step 1.</p>;
     }
 
     return (
         <div className="space-y-6">
-            <h2 className="text-xl font-semibold">Step 4: Select Date & Time Slot</h2> {/* Updated Step number? Check booking-form.tsx */} 
+            <h2 className="text-xl font-semibold">Step 4: Select Date & Time Slot</h2> {/* Updated Step number? Check booking-form.tsx */}
 
             {/* Date Selection using Popover */}
             <div>
@@ -221,7 +221,7 @@ export default function StepTimeslotSelect(/* { formData, updateFormData }: Step
 
             {/* Time Slot Selection */}
             {prerequisiteMissingMessage && (
-                 <p className="text-sm text-orange-600">{prerequisiteMissingMessage}</p>
+                <p className="text-sm text-orange-600">{prerequisiteMissingMessage}</p>
             )}
 
             {!prerequisiteMissingMessage && selectedDate && (
@@ -231,7 +231,7 @@ export default function StepTimeslotSelect(/* { formData, updateFormData }: Step
                     {error && <Alert variant="destructive"><AlertTitle>Error</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
                     {!isLoading && !error && availableSlots.length === 0 && (
                         <p className="text-gray-600">
-                            {destinationType === 'mobile' 
+                            {destinationType === 'mobile'
                                 ? "No available 2-hour blocks (including travel time) found for the selected dispatch lounge and date."
                                 : "No available slots found matching the required duration and capacity for all attendees on this date."}
                         </p>

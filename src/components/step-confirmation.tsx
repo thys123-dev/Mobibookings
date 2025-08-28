@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useMemo } from 'react';
-import { format, parseISO, isValid } from 'date-fns';
+import { format, parseISO, isValid, addMinutes } from 'date-fns';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { BookingFormData } from './booking-form';
@@ -10,18 +10,18 @@ import { LOUNGE_LOCATIONS } from '@/lib/constants';
 // Reuse the Treatment interface (ideally imported from types.ts)
 // Define it here temporarily if not passed down or imported
 interface Treatment {
-  id: number | string;
-  name: string;
-  price: number;
-  duration_minutes_200ml: number; // Keep both for potential future use
-  duration_minutes_1000ml: number;
+    id: number | string;
+    name: string;
+    price: number;
+    duration_minutes_200ml: number; // Keep both for potential future use
+    duration_minutes_1000ml: number;
 }
 
 // Vitamin interface - assuming it will be available from props or a shared type
 interface Vitamin {
-  id: number | string;
-  name: string;
-  price: number;
+    id: number | string;
+    name: string;
+    price: number;
 }
 
 interface StepConfirmationProps {
@@ -74,9 +74,9 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
 
     // Helper to get vitamin details
     const getVitaminDetails = (vitaminId: string | number | undefined | null): Vitamin | undefined => {
-      if (!vitaminId || vitaminId === 'none') return undefined;
-      // Use vitaminsList from props (formData doesn't contain it, it comes from BookingForm directly)
-      return vitaminsList.find(v => String(v.id) === String(vitaminId));
+        if (!vitaminId || vitaminId === 'none') return undefined;
+        // Use vitaminsList from props (formData doesn't contain it, it comes from BookingForm directly)
+        return vitaminsList.find(v => String(v.id) === String(vitaminId));
     }
 
     const DEXTROSE_EXTRA_COST = 200; // Define cost here too for consistency
@@ -86,14 +86,14 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
         if (!attendees || attendees.length === 0) {
             return 0;
         }
-        
+
         return attendees.reduce((total, attendee) => {
             const treatment = getTreatmentDetails(attendee.treatmentId);
             const addOnTreatment = getTreatmentDetails(attendee.addOnTreatmentId); // Get add-on details
             const selectedVitamin = getVitaminDetails(attendee.additionalVitaminId);
 
             let currentCost = 0; // Start cost at 0
-            
+
             if (treatment) {
                 currentCost += treatment.price; // Add base price if treatment exists
 
@@ -102,7 +102,7 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
                 }
                 // Always add Dextrose cost if selected, independently of add-on
                 if (attendee.fluidOption === '1000ml_dextrose') {
-                     currentCost += DEXTROSE_EXTRA_COST;
+                    currentCost += DEXTROSE_EXTRA_COST;
                 }
                 // Add vitamin cost
                 if (selectedVitamin) {
@@ -110,7 +110,7 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
                 }
             }
             // No need to check treatment again here, already handled above
-            return total + currentCost; 
+            return total + currentCost;
         }, 0);
     }, [attendees, treatmentsList]); // Dependencies look correct
 
@@ -144,7 +144,7 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
                                 <Label>Date:</Label>
                                 <span>{formattedDate}</span>
 
-                                <Label>Time:</Label>
+                                <Label>Start Time:</Label>
                                 <span>{selectedTimeDisplay}</span>
                             </>
                         )}
@@ -178,6 +178,8 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
                 </CardContent>
             </Card>
 
+
+
             <Card>
                 <CardHeader>
                     <CardTitle className="text-lg">Attendee Details</CardTitle>
@@ -190,13 +192,13 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
                             const treatment = getTreatmentDetails(attendee.treatmentId);
                             const addOnTreatment = getTreatmentById(attendee.addOnTreatmentId); // Define addOnTreatment HERE
                             const selectedVitamin = getVitaminDetails(attendee.additionalVitaminId);
-                            
+
                             // Calculate display price and duration based on fluid option
                             const displayPrice = useMemo(() => {
                                 if (!treatment) { // Only need base treatment to exist
                                     return undefined;
                                 }
-                                
+
                                 let currentCost = treatment.price;
                                 // Add add-on treatment price if it exists
                                 if (addOnTreatment) {
@@ -218,12 +220,12 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
                             if (addOnTreatment) {
                                 displayDurationText = '90 minutes'; // Fixed duration if add-on selected
                             } else if (treatment && attendee.fluidOption) {
-                                const durationMinutes = attendee.fluidOption === '200ml' 
-                                    ? treatment.duration_minutes_200ml 
+                                const durationMinutes = attendee.fluidOption === '200ml'
+                                    ? treatment.duration_minutes_200ml
                                     : treatment.duration_minutes_1000ml;
                                 displayDurationText = `${durationMinutes} minutes`;
                             }
-                            
+
                             // Format fluid option text
                             let fluidText: string = attendee.fluidOption || 'N/A';
                             if (attendee.fluidOption === '1000ml_dextrose') {
@@ -232,23 +234,23 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
 
                             return (
                                 <div key={index} className="p-3 border border-gray-300 rounded-md bg-muted/30 space-y-2">
-                                     <h4 className="font-medium">Attendee {index + 1}: {attendee.firstName || 'N/A'} {attendee.lastName || 'N/A'}</h4>
-                                     <div className="grid grid-cols-[auto_1fr] gap-x-2 text-sm">
-                                         {/* Display Email and Phone per attendee - MOVED UP */}
+                                    <h4 className="font-medium">Attendee {index + 1}: {attendee.firstName || 'N/A'} {attendee.lastName || 'N/A'}</h4>
+                                    <div className="grid grid-cols-[auto_1fr] gap-x-2 text-sm">
+                                        {/* Display Email and Phone per attendee - MOVED UP */}
                                         <Label className="text-right">Email:</Label>
                                         <span>{attendee.email || 'N/A'}</span>
 
                                         <Label className="text-right">Phone:</Label>
                                         <span>{attendee.phone || 'N/A'}</span>
-                                        
-                                         <Label className="text-right">Treatment:</Label>
-                                         <span>{treatment?.name || 'N/A'}</span>
+
+                                        <Label className="text-right">Treatment:</Label>
+                                        <span>{treatment?.name || 'N/A'}</span>
 
                                         {/* ADDED: Display Fluid Option */}
                                         <Label className="text-right">Fluid:</Label>
                                         <span>{fluidText}</span>
 
-                                        {/* Display Add-on Treatment - Styled like others, with price */} 
+                                        {/* Display Add-on Treatment - Styled like others, with price */}
                                         {addOnTreatment && (
                                             <>
                                                 <Label className="text-right font-semibold">Add-on:</Label>
@@ -263,20 +265,20 @@ export default function StepConfirmation({ formData, treatmentsList, vitaminsLis
                                             </>
                                         )}
 
-                                         <Label className="text-right">Duration:</Label>
-                                         {/* Use the adjusted duration text */}
-                                         <span>{displayDurationText}</span>
+                                        <Label className="text-right">Duration:</Label>
+                                        {/* Use the adjusted duration text */}
+                                        <span>{displayDurationText}</span>
 
-                                         <Label className="text-right">Price:</Label>
-                                         <span>{displayPrice !== undefined ? `R ${displayPrice.toFixed(0)}` : 'N/A'}</span>
-                                     </div>
+                                        <Label className="text-right">Price:</Label>
+                                        <span>{displayPrice !== undefined ? `R ${displayPrice.toFixed(0)}` : 'N/A'}</span>
+                                    </div>
                                 </div>
                             );
                         })
                     )}
-                     {/* --- ADDED: Display Total Cost --- */}
-                     <div className="mt-4 pt-4 border-t">
-                         <p className="text-lg font-semibold text-right">Total Estimated Cost: R {totalCost.toFixed(0)}</p>
+                    {/* --- ADDED: Display Total Cost --- */}
+                    <div className="mt-4 pt-4 border-t">
+                        <p className="text-lg font-semibold text-right">Total Estimated Cost: R {totalCost.toFixed(0)}</p>
                     </div>
 
                     <p className="text-xs text-gray-600 pt-4">Please review all details carefully. Clicking "Submit Booking" will finalize your request.</p>

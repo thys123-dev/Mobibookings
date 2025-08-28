@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { getSupabaseAdmin } from '@/lib/database/supabase-client';
+import { PostgrestError } from '@supabase/supabase-js';
 // import { IV_THERAPIES } from '@/lib/constants'; // No longer needed if fetching from DB
 import { createCalendarEvent } from '@/lib/google-calendar'; // Import GCal helper
+import { calculateOptimizedSequentialBookingPattern } from '@/lib/sequential-booking';
 // import { BookingFormData } from '@/components/booking-form'; // Type not strictly needed here if using Zod
 // import { AttendeeData } from '@/components/booking-form'; // Maybe import if needed later
 
@@ -68,6 +70,87 @@ interface VitaminDbInfo {
     name: string;
 }
 
+export async function GET(request: NextRequest) {
+    try {
+        const supabaseAdmin = getSupabaseAdmin();
+
+        // Get query parameters for pagination/filtering
+        const { searchParams } = new URL(request.url);
+        const limit = parseInt(searchParams.get('limit') || '10');
+        const offset = parseInt(searchParams.get('offset') || '0');
+
+        console.log('=== Fetching Bookings ===');
+        console.log(`Limit: ${limit}, Offset: ${offset}`);
+
+        // Fetch bookings with location information
+        const { data: bookings, error } = await supabaseAdmin
+            .from('bookings')
+            .select(`
+        id,
+        user_name,
+        user_email,
+        user_phone,
+        attendee_count,
+        booking_time,
+        start_time,
+        end_time,
+        google_event_id,
+        attendees_details,
+        is_mobile_service,
+        client_address,
+        locations!bookings_location_id_fkey (
+          id,
+          name
+        )
+      `)
+            .order('booking_time', { ascending: false })
+            .range(offset, offset + limit - 1);
+
+        if (error) {
+            console.error('Error fetching bookings:', error);
+            return NextResponse.json({
+                success: false,
+                error: 'Failed to fetch bookings',
+                details: error.message
+            }, { status: 500 });
+        }
+
+        // Format the response
+        const formattedBookings = bookings?.map(booking => ({
+            id: booking.id,
+            customer_name: booking.user_name,
+            email: booking.user_email,
+            phone: booking.user_phone,
+            attendee_count: booking.attendee_count,
+            booking_time: booking.booking_time,
+            appointment_time: booking.start_time,
+            end_time: booking.end_time,
+            location: (booking.locations as any)?.name || 'Unknown',
+            location_id: (booking.locations as any)?.id,
+            is_mobile_service: booking.is_mobile_service,
+            client_address: booking.client_address,
+            google_event_id: booking.google_event_id,
+            attendees_details: booking.attendees_details
+        })) || [];
+
+        return NextResponse.json({
+            success: true,
+            bookings: formattedBookings,
+            total: formattedBookings.length,
+            offset,
+            limit
+        });
+
+    } catch (error) {
+        console.error('Error in GET /api/bookings:', error);
+        return NextResponse.json({
+            success: false,
+            error: 'Internal server error',
+            details: error instanceof Error ? error.message : 'Unknown error'
+        }, { status: 500 });
+    }
+}
+
 export async function POST(request: NextRequest) {
     let bookingData: BookingData;
     let supabaseAdmin;
@@ -109,8 +192,8 @@ export async function POST(request: NextRequest) {
             // We need to calculate the actual start of the 4-slot block (30 mins prior)
             const treatmentStartTime = new Date(bookingData.selectedStartTime);
             // Assign to the higher-scoped variable
-            travelBlockStartTime = new Date(treatmentStartTime.getTime() - 30 * 60 * 1000).toISOString(); 
-            
+            travelBlockStartTime = new Date(treatmentStartTime.getTime() - 30 * 60 * 1000).toISOString();
+
             console.log(`Mobile service booking attempt for dispatch lounge ${bookingData.loungeLocationId} at ${bookingData.clientAddress}, treatment start ${bookingData.selectedStartTime}, travel block start ${travelBlockStartTime}`);
 
             // Ensure primary contact info is available for the RPC call
@@ -119,7 +202,7 @@ export async function POST(request: NextRequest) {
                 // This should ideally be caught by Zod schema, but an explicit check before RPC is good.
                 console.error('Primary attendee email or phone missing for mobile booking RPC call.');
                 return NextResponse.json({ error: 'Primary attendee contact details are required.' }, { status: 400 });
-        }
+            }
 
             const paramsForMobileRpc = {
                 p_dispatch_lounge_id: bookingData.loungeLocationId,
@@ -134,21 +217,61 @@ export async function POST(request: NextRequest) {
             console.log("--- Params for book_mobile_appointment_v1 RPC ---", JSON.stringify(paramsForMobileRpc, null, 2)); // Log params for mobile RPC
 
             ({ data: rpcResult, error: rpcError } = await supabaseAdmin.rpc(
-                'book_mobile_appointment_v1', 
+                'book_mobile_appointment_v1',
                 paramsForMobileRpc
             ));
 
         } else {
-            // ---- Existing Lounge Booking Logic ----
-            ({ data: rpcResult, error: rpcError } = await supabaseAdmin.rpc(
-            'book_appointment_multi_slot',
-            {
-            p_location_id: bookingData.loungeLocationId,
-            p_start_time: bookingData.selectedStartTime,
-                p_attendee_count: bookingData.attendeeCount,
-                p_attendees_details: bookingData.attendees
+            // ---- Enhanced Lounge Booking Logic ----
+            console.log(`🎯 Processing lounge booking for ${bookingData.attendeeCount} attendees`);
+
+            if (bookingData.attendeeCount > 2) {
+                // SEQUENTIAL BOOKING: For groups > 2 attendees
+                console.log(`🔄 Using sequential booking logic for ${bookingData.attendeeCount} attendees`);
+
+                // First, get treatment durations to calculate the sequential pattern
+                const uniqueTreatmentIds = Array.from(new Set(bookingData.attendees.map(a => a.treatmentId)));
+                const { data: treatmentDurations, error: durationError } = await supabaseAdmin
+                    .from('treatments')
+                    .select('id, duration_minutes_200ml, duration_minutes_1000ml')
+                    .in('id', uniqueTreatmentIds);
+
+                if (durationError || !treatmentDurations) {
+                    return NextResponse.json({ error: 'Failed to fetch treatment durations for sequential booking validation.' }, { status: 500 });
+                }
+
+                const durationMap = new Map();
+                treatmentDurations.forEach(t => durationMap.set(t.id, t));
+
+                const { slotAssignments, isSequential } = calculateOptimizedSequentialBookingPattern(bookingData.attendees, durationMap, 2);
+
+                console.log(`📊 Sequential pattern: ${slotAssignments.length} groups, optimized: ${isSequential}`);
+
+                // Use enhanced RPC function for sequential booking
+                ({ data: rpcResult, error: rpcError } = await supabaseAdmin.rpc(
+                    'book_appointment_sequential',
+                    {
+                        p_location_id: bookingData.loungeLocationId,
+                        p_start_time: bookingData.selectedStartTime,
+                        p_attendee_count: bookingData.attendeeCount,
+                        p_attendees_details: bookingData.attendees,
+                        p_slot_assignments: slotAssignments
+                    }
+                ));
+            } else {
+                // PARALLEL BOOKING: For 1-2 attendees (existing logic)
+                console.log(`📊 Using parallel booking logic for ${bookingData.attendeeCount} attendees`);
+
+                ({ data: rpcResult, error: rpcError } = await supabaseAdmin.rpc(
+                    'book_appointment_multi_slot',
+                    {
+                        p_location_id: bookingData.loungeLocationId,
+                        p_start_time: bookingData.selectedStartTime,
+                        p_attendee_count: bookingData.attendeeCount,
+                        p_attendees_details: bookingData.attendees
+                    }
+                ));
             }
-            ));
         }
 
         if (rpcError) {
@@ -175,10 +298,10 @@ export async function POST(request: NextRequest) {
         const bookingConfirmation = rpcResult[0];
 
         // Check the structure of the first row object
-        if (typeof bookingConfirmation.booking_id !== 'number' || bookingConfirmation.booking_id <= 0 || 
+        if (typeof bookingConfirmation.booking_id !== 'number' || bookingConfirmation.booking_id <= 0 ||
             typeof bookingConfirmation.required_span !== 'number' || bookingConfirmation.required_span <= 0) {
-             console.error('Supabase RPC Error: Expected {booking_id: number, required_span: number} in result array element, received:', bookingConfirmation);
-             return NextResponse.json({ error: 'Database error: Invalid booking confirmation data structure received.' }, { status: 500 });
+            console.error('Supabase RPC Error: Expected {booking_id: number, required_span: number} in result array element, received:', bookingConfirmation);
+            return NextResponse.json({ error: 'Database error: Invalid booking confirmation data structure received.' }, { status: 500 });
         }
 
         // Assign values from the extracted object
@@ -194,11 +317,11 @@ export async function POST(request: NextRequest) {
             primaryPhone = bookingData.attendees[0]?.phone;
 
             if (!primaryEmail || !primaryPhone) {
-                 // This should ideally be caught by frontend validation, but double-check
-                 console.error(`Booking ${newBookingId}: Missing email or phone for the primary attendee (index 0).`);
-                 // Decide how to handle: fail the request or proceed with missing primary contact?
-                 // Let's fail it for now to ensure data integrity.
-                 return NextResponse.json({ error: 'Primary attendee email and phone are missing.'}, { status: 400 });
+                // This should ideally be caught by frontend validation, but double-check
+                console.error(`Booking ${newBookingId}: Missing email or phone for the primary attendee (index 0).`);
+                // Decide how to handle: fail the request or proceed with missing primary contact?
+                // Let's fail it for now to ensure data integrity.
+                return NextResponse.json({ error: 'Primary attendee email and phone are missing.' }, { status: 400 });
             }
 
             // --- ADDED Logging before update ---
@@ -218,33 +341,41 @@ export async function POST(request: NextRequest) {
                 .select(); // Select the updated row to confirm
 
             if (updateError) {
-                 // --- MODIFIED Logging on error ---
+                // --- MODIFIED Logging on error ---
                 console.error(`FAILED to update booking ${newBookingId} with attendee details:`, updateError); // Log full error object
                 // Decide whether to proceed? For now, let GCal happen but log error.
             } else {
                 // --- ADDED Logging on success --- 
-                 console.log(`Successfully ran update query for booking ID: ${newBookingId}.`);
-                 if (!updateData || updateData.length === 0) {
-                     console.warn(`Booking update query for ID ${newBookingId} succeeded BUT returned no data. Row might not exist or condition failed?`);
-                 } else {
-                     console.log(`Booking ${newBookingId} confirmed updated with attendee details. Data:`, JSON.stringify(updateData));
-                 }
+                console.log(`Successfully ran update query for booking ID: ${newBookingId}.`);
+                if (!updateData || updateData.length === 0) {
+                    console.warn(`Booking update query for ID ${newBookingId} succeeded BUT returned no data. Row might not exist or condition failed?`);
+                } else {
+                    console.log(`Booking ${newBookingId} confirmed updated with attendee details. Data:`, JSON.stringify(updateData));
+                }
             }
-        } catch(updateCatchError: any) {
-             // --- MODIFIED Logging on exception ---
-             console.error(`Exception during booking update logic for ${newBookingId}:`, updateCatchError); 
+        } catch (updateCatchError: any) {
+            // --- MODIFIED Logging on exception ---
+            console.error(`Exception during booking update logic for ${newBookingId}:`, updateCatchError);
+        }
+
+        // ---- Fetch location details (for both GCal and Zoho) ----
+        const { data: locationData, error: locationError } = await supabaseAdmin
+            .from('locations')
+            .select('name, google_calendar_id')
+            .eq('id', bookingData.loungeLocationId)
+            .single();
+
+        if (locationError) {
+            console.error('Supabase Error:', locationError);
+            return NextResponse.json({ error: 'Failed to fetch location details', details: locationError.message || 'Database error' }, { status: 500 });
+        }
+        if (!locationData || !locationData.google_calendar_id) {
+            return NextResponse.json({ error: `Failed to fetch location details: Missing required data for location ${bookingData.loungeLocationId}` }, { status: 500 });
         }
 
         // ---- Google Calendar Event Creation ----
         let googleEventId: string | null = null;
         try {
-            // Fetch location details (for GCal ID)
-            const { data: locationData, error: locationError } = await supabaseAdmin
-                .from('locations')
-                .select('name, google_calendar_id')
-                .eq('id', bookingData.loungeLocationId)
-                .single();
-
             // Fetch treatment names AND durations for ALL attendees
             const uniqueTreatmentIds = Array.from(new Set(bookingData.attendees.map(a => a.treatmentId)));
             // --- NEW: Collect unique add-on IDs as well ---
@@ -263,7 +394,7 @@ export async function POST(request: NextRequest) {
                 .in('id', allUniqueTreatmentAndAddOnIds); // Fetch details for both base and add-on treatments
 
             if (treatmentsAndAddOnsError || !treatmentsAndAddOnsData) {
-                 throw new Error(`Failed to fetch treatment and add-on details: ${treatmentsAndAddOnsError?.message}`);
+                throw new Error(`Failed to fetch treatment and add-on details: ${treatmentsAndAddOnsError?.message}`);
             }
 
             // Create a map for easy lookup (handles both base and add-on names)
@@ -294,15 +425,15 @@ export async function POST(request: NextRequest) {
 
             // --- Fetch treatment durations (both 200ml and 1000ml) ---
             // --- NOTE: Duration fetch only needs BASE treatment IDs ---
-             const { data: treatmentsDurationData, error: treatmentsDurationError } = await supabaseAdmin
+            const { data: treatmentsDurationData, error: treatmentsDurationError } = await supabaseAdmin
                 .from('treatments')
                 .select('id, name, duration_minutes_200ml, duration_minutes_1000ml') // Select both durations
                 .in('id', uniqueTreatmentIds); // <<< Use only uniqueTreatmentIds (base treatments)
 
             if (treatmentsDurationError || !treatmentsDurationData) {
-                 throw new Error(`Failed to fetch treatment durations: ${treatmentsDurationError?.message}`);
+                throw new Error(`Failed to fetch treatment durations: ${treatmentsDurationError?.message}`);
             }
-            const treatmentDurationMap = new Map<string | number, { name: string, duration_200: number, duration_1000: number}>();
+            const treatmentDurationMap = new Map<string | number, { name: string, duration_200: number, duration_1000: number }>();
             treatmentsDurationData.forEach(t => treatmentDurationMap.set(t.id, { name: t.name, duration_200: t.duration_minutes_200ml, duration_1000: t.duration_minutes_1000ml }));
 
             // --- MODIFIED: Conditional GCal start and end time determination ---
@@ -314,7 +445,7 @@ export async function POST(request: NextRequest) {
                 // selectedStartTime is the treatment start (2nd slot).
                 // travelBlockStartTime is the actual start of the 4-slot engagement (1st slot).
                 // actualSlotSpan is 4 (for the 2-hour total duration including travel).
-                
+
                 // Ensure travelBlockStartTime is defined before using it
                 if (!travelBlockStartTime) {
                     console.error('Critical error: travelBlockStartTime is not defined for mobile service GCal event.');
@@ -325,16 +456,16 @@ export async function POST(request: NextRequest) {
                 gCalEndTime = new Date(new Date(travelBlockStartTime).getTime() + actualSlotSpan * 30 * 60 * 1000).toISOString();
             } else {
                 // For lounge service (existing logic):
-            const { data: bookedSlotsData, error: bookedSlotsError } = await supabaseAdmin
-                .from('time_slots')
-                .select('start_time, end_time')
-                .eq('location_id', bookingData.loungeLocationId)
-                .gte('start_time', bookingData.selectedStartTime)
-                .order('start_time', { ascending: true })
-                    .limit(actualSlotSpan); 
+                const { data: bookedSlotsData, error: bookedSlotsError } = await supabaseAdmin
+                    .from('time_slots')
+                    .select('start_time, end_time')
+                    .eq('location_id', bookingData.loungeLocationId)
+                    .gte('start_time', bookingData.selectedStartTime)
+                    .order('start_time', { ascending: true })
+                    .limit(actualSlotSpan);
 
                 if (bookedSlotsError || !bookedSlotsData || bookedSlotsData.length < actualSlotSpan) {
-                 throw new Error(`Failed to fetch details of booked slots (required: ${actualSlotSpan}) for booking ${newBookingId}: ${bookedSlotsError?.message}`);
+                    throw new Error(`Failed to fetch details of booked slots (required: ${actualSlotSpan}) for booking ${newBookingId}: ${bookedSlotsError?.message}`);
                 }
                 gCalStartTime = bookingData.selectedStartTime; // Correct for lounge bookings
                 gCalEndTime = bookedSlotsData[actualSlotSpan - 1].end_time; // Correct for lounge bookings
@@ -343,22 +474,23 @@ export async function POST(request: NextRequest) {
 
             // --- GCal Event Details ---
             if (locationError || !locationData || !locationData.google_calendar_id) {
-                throw new Error(`Failed to fetch location details or Google Calendar ID for ${bookingData.loungeLocationId}: ${locationError?.message}`);
+                const details = locationError ? `: ${JSON.stringify(locationError)}` : '';
+                throw new Error(`Failed to fetch location details or Google Calendar ID for ${bookingData.loungeLocationId}${details}`);
             }
             if (!gCalEndTime) { // Added check for gCalEndTime, though it should always be set by logic above
-                 throw new Error(`Missing end_time for the Google Calendar event`);
+                throw new Error(`Missing end_time for the Google Calendar event`);
             }
             if (treatmentAndAddOnInfoMap.size !== allUniqueTreatmentAndAddOnIds.length) {
-                 // Check if we found info for all requested unique treatments
-                 console.warn(`Could not find details for all treatment IDs requested. Found: ${treatmentAndAddOnInfoMap.size}, Requested unique: ${allUniqueTreatmentAndAddOnIds.length}`);
-                 // Decide if this is a fatal error or just continue with partial info
+                // Check if we found info for all requested unique treatments
+                console.warn(`Could not find details for all treatment IDs requested. Found: ${treatmentAndAddOnInfoMap.size}, Requested unique: ${allUniqueTreatmentAndAddOnIds.length}`);
+                // Decide if this is a fatal error or just continue with partial info
             }
 
             // Use first attendee's name for primary identification in summary
             const primaryAttendee = bookingData.attendees[0];
             let eventSummary = `IV Booking - ${primaryAttendee.firstName} ${primaryAttendee.lastName}`;
-            if(bookingData.attendeeCount > 1) {
-                 eventSummary += ` (+${bookingData.attendeeCount - 1} others)`;
+            if (bookingData.attendeeCount > 1) {
+                eventSummary += ` (+${bookingData.attendeeCount - 1} others)`;
             }
             if (isMobileService) {
                 eventSummary += ` (Mobile Service)`;
@@ -394,25 +526,25 @@ export async function POST(request: NextRequest) {
                 const lookupId = typeof attendee.treatmentId === 'string' ? parseInt(attendee.treatmentId, 10) : attendee.treatmentId;
                 const treatmentDetails = treatmentDurationMap.get(lookupId); // For duration and base name
                 const treatmentName = treatmentDetails ? treatmentDetails.name : `Unknown Treatment (ID: ${attendee.treatmentId})`;
-                
+
                 // Determine correct duration based on fluidOption AND add-on
                 let duration = 'N/A';
                 if (attendee.addOnTreatmentId) {
                     duration = '90 minutes'; // Fixed duration for add-on
                 } else if (treatmentDetails && attendee.fluidOption) {
-                   duration = attendee.fluidOption === '200ml' 
-                                ? `${treatmentDetails.duration_200} minutes` 
-                                : `${treatmentDetails.duration_1000} minutes`;
+                    duration = attendee.fluidOption === '200ml'
+                        ? `${treatmentDetails.duration_200} minutes`
+                        : `${treatmentDetails.duration_1000} minutes`;
                 }
-                
+
                 // ADDED: Include email/phone/fluid/duration in GCal description per attendee
                 // Reordered and added Vitamins
                 eventDescription += `  ${index + 1}. ${attendee.firstName} ${attendee.lastName}\n` +
-                                  `     Email: ${attendee.email}\n` +
-                                  `     Phone: ${attendee.phone}\n` +
-                                  `     Treatment: ${treatmentName}\n` +
-                                  `     Fluid: ${attendee.fluidOption || 'N/A'}${attendee.fluidOption === '1000ml_dextrose' ? ' (+Dextrose)' : ''}\n`;
-                
+                    `     Email: ${attendee.email}\n` +
+                    `     Phone: ${attendee.phone}\n` +
+                    `     Treatment: ${treatmentName}\n` +
+                    `     Fluid: ${attendee.fluidOption || 'N/A'}${attendee.fluidOption === '1000ml_dextrose' ? ' (+Dextrose)' : ''}\n`;
+
                 // Add Add-on treatment if present
                 if (attendee.addOnTreatmentId) {
                     const addOnLookupId = typeof attendee.addOnTreatmentId === 'string' ? parseInt(attendee.addOnTreatmentId, 10) : attendee.addOnTreatmentId;
@@ -459,30 +591,64 @@ export async function POST(request: NextRequest) {
             // We already successfully booked in the DB, so return success to user
         }
 
-        // TODO: Add Zoho integration here
+        // ---- Zoho CRM Integration ----
+        let zohoRecordId: string | undefined;
+        try {
+            // Prepare data for Zoho integration
+            const origin = new URL(request.url).origin;
+            const zohoResponse = await fetch(`${origin}/api/zoho/create-booking`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    ...bookingData,
+                    location_name: locationData.name,
+                    booking_id: newBookingId,
+                    google_event_id: googleEventId,
+                    local_start_time: bookingData.selectedStartTime,
+                    // Provide a webhook URL to forward Zoho payload + booking metadata
+                    webhook_url: 'https://flow.zoho.com/823688534/flow/webhook/incoming?zapikey=1001.dd8d8fa3803021cb928bcf54ecdf4cc5.504c26ee5d0532d595217d855562118c&isdebug=false',
+                }),
+            });
 
+            const zohoResult = await zohoResponse.json();
+            if (zohoResult.success && zohoResult.zoho_record_id) {
+                zohoRecordId = zohoResult.zoho_record_id;
+                console.log('Successfully created Zoho CRM record:', zohoRecordId);
+
+                // Update booking with Zoho record ID
+                const { error: updateError } = await supabaseAdmin
+                    .from('bookings')
+                    .update({ zoho_record_id: zohoRecordId })
+                    .eq('id', newBookingId);
+
+                if (updateError) {
+                    console.error(`Failed to update booking ${newBookingId} with Zoho Record ID ${zohoRecordId}:`, updateError);
+                }
+            } else {
+                console.error('Zoho integration failed:', zohoResult.error || 'Unknown error');
+            }
+        } catch (zohoError: any) {
+            // Log the error but don't fail the booking response to the user
+            console.error('Zoho CRM integration failed:', zohoError.message);
+            // We already successfully booked in the DB, so return success to user
+        }
+
+        // Return success response with all IDs
         return NextResponse.json({
-            message: 'Booking successful!',
-            bookingId: newBookingId,
-            googleEventId: googleEventId // Optionally return GCal event ID
-        }, { status: 201 });
+            success: true,
+            booking_id: newBookingId,
+            google_event_id: googleEventId,
+            zoho_record_id: zohoRecordId,
+        });
 
     } catch (error) {
         if (error instanceof z.ZodError) {
             console.error('Zod Validation Errors:', error.errors);
-            // --- NEW: Customize error message for clientAddress based on refine ---
-            const clientAddressError = error.errors.find(e => e.path.includes('clientAddress') && e.message === "Client address is required for mobile service bookings.");
-            if (clientAddressError) {
-                 return NextResponse.json({ error: clientAddressError.message, details: error.errors }, { status: 400 });
-            }
-            return NextResponse.json({ error: 'Invalid input data', details: error.errors }, { status: 400 });
+            return NextResponse.json({ error: 'Invalid booking data', details: error.errors }, { status: 400 });
         }
-        if (error instanceof Error && error.message.includes("admin client is not initialized")) {
-            console.error("Booking API failed: Supabase admin client not initialized.");
-            return NextResponse.json({ error: 'Server configuration error.' }, { status: 500 });
-        }
-        console.error('Error in /api/bookings:', error);
-        const message = error instanceof Error ? error.message : 'An unknown error occurred.';
-        return NextResponse.json({ error: 'An unexpected error occurred.', details: message }, { status: 500 });
+        console.error('Error in POST /api/bookings:', error);
+        return NextResponse.json({ error: 'Internal server error', details: error instanceof Error ? error.message : 'Unknown error' }, { status: 500 });
     }
 } 
